@@ -417,7 +417,7 @@ class KingPSFFitter:
         # Get initial guess from peak location.
         # alpha_guess = bin_centers[np.argmax(hist)]
         alpha_guess = bin_centers[np.searchsorted(cdf_hist, 0.5)]
-        best_params = [np.inf, np.inf]
+        best_params = None
         best_chi2 = np.inf
         for beta in [1.25, 1.75, 2, 2.5, 4, 7, 9]:
             result = minimize(
@@ -434,19 +434,18 @@ class KingPSFFitter:
             if result.success and (best_chi2 > result.fun):
                 best_params, best_chi2 = result.x, result.fun
 
+        # Store histogram data (pad/truncate to match storage size).
+        # Make sure to rescale by the phase space to get densities.
+        n_store = min(len(hist), self.dpsi_nbins)
+        self.histograms[param_idx][:n_store] = hist[:n_store] / delta
+        self.uncertainties[param_idx][:n_store] = np.sqrt(hist2[:n_store]) / delta
+        self.dpsi_bins[param_idx][: len(dpsi_bins)] = dpsi_bins
+
         # Store results if we found a solution
         if best_params is not None:
             self.fit_alpha[param_idx] = best_params[0]
             self.fit_beta[param_idx] = best_params[1]
             self.fit_quality[param_idx] = best_chi2
-
-            # Store histogram data (pad/truncate to match storage size).
-            # Make sure to rescale by the phase space to get densities.
-            n_store = min(len(hist), self.dpsi_nbins)
-            self.histograms[param_idx][:n_store] = hist[:n_store] / delta
-            self.uncertainties[param_idx][:n_store] = np.sqrt(hist2[:n_store]) / delta
-            self.dpsi_bins[param_idx][: len(dpsi_bins)] = dpsi_bins
-
             return True
 
         return False

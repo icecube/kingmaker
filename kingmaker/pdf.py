@@ -84,9 +84,9 @@ class KingPDF:
                 return 0
 
         if np.any(alpha <= 0):
-            raise ValueError("Received alpha <= 0. The PDF is not defined here.")
+            raise ValueError("Received alpha <= 0. The King distribution is not defined here.")
         if np.any(beta <= 1):
-            raise ValueError("Received beta <= 1. The PDF is not defined here.")
+            raise ValueError("Received beta <= 1. The King distribution is not defined here.")
 
         # Broadcast
         x, alpha, beta = np.broadcast_arrays(x, alpha, beta)

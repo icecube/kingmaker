@@ -1,8 +1,7 @@
 from typing import Tuple, Union
 import numpy as np
 import numpy.typing as npt
-from numba import njit, vectorize, prange
-from numba import float32, float64
+from numba import njit, prange
 
 
 @njit(cache=True)
@@ -61,26 +60,10 @@ def angular_distance(
         Angular separation(s) in radians.
     """
     cosDist = np.cos(src_ra - ra) * np.cos(src_dec) * np.cos(dec) + np.sin(src_dec) * np.sin(dec)
-    return np.arccos(cosDist)  # type: ignore[no-any-return]
+    return np.arccos(np.minimum(np.maximum(cosDist, -1.0), 1.0))  # type: ignore[no-any-return]
 
 
-@vectorize(
-    [float32(float32, float32, float32, float32), float64(float64, float64, float64, float64)],
-    target="parallel",
-    cache=True,
-)
-def _angular_distance_parallel(
-    src_ra: float,
-    src_dec: float,
-    ra: float,
-    dec: float,
-) -> float:
-    """Element-wise angular distance, parallelized across CPU threads via OpenMP."""
-    cosDist = np.cos(src_ra - ra) * np.cos(src_dec) * np.cos(dec) + np.sin(src_dec) * np.sin(dec)
-    return np.arccos(cosDist)
-
-
-@njit(parallel=True, cache=True)
+@njit(cache=True)
 def _pre_mask_and_distance(
     ra: npt.NDArray[np.floating],
     dec: npt.NDArray[np.floating],
@@ -114,7 +97,7 @@ def _pre_mask_and_distance(
         cos_dist = np.cos(ra[i] - src_ra) * cos_src_dec * np.cos(dec[i]) + sin_src_dec * np.sin(
             dec[i]
         )
-        d = np.arccos(cos_dist)
+        d = np.arccos(min(max(cos_dist, -1), 1))
         if d < cutoff:
             dists[i] = d
     return dists

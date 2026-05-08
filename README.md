@@ -11,7 +11,7 @@ A Python library for working with King/Moffat distributions for modeling point s
 The **King distribution** (also known as the **Moffat distribution**, see [wikipedia](https://en.wikipedia.org/wiki/Moffat_distribution).) is a two-parameter probability distribution commonly used to describe the point spread function (PSF) of astronomical observations. This package uses the exact spherical form:
 
 ```
-f(theta | alpha, beta) = [1 + (1 - cos(theta)) / (alpha^2 * beta)]^(-beta)
+f(theta | alpha, beta) ∝ [1 + (1 - cos(theta)) / (alpha^2 * beta)]^(-beta)
 ```
 
 where:
