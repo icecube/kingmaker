@@ -51,7 +51,6 @@ jobs:
         test_file:
           - test_basic
           - test_king_pdf
-          - test_interpolated_king_pdf
           - test_template_smeared_king_pdf
           - test_utils
           - test_fitting

@@ -1,13 +1,10 @@
 from typing import Tuple, Union
 import numpy as np
 import numpy.typing as npt
-from numba import guvectorize, njit
-from numba import float32, float64
-
-_log10pi: float = np.log10(np.pi)
+from numba import njit, prange
 
 
-@njit
+@njit(cache=True)
 def _interp1d(x: float, xlow: float, xhigh: float, ylow: float, yhigh: float) -> float:
     """
     Perform 1D linear interpolation.
@@ -33,88 +30,7 @@ def _interp1d(x: float, xlow: float, xhigh: float, ylow: float, yhigh: float) ->
     return ylow + (yhigh - ylow) / (xhigh - xlow) * (x - xlow)
 
 
-@guvectorize(
-    [
-        (float32, float32, float32[:], float32[:], float32[:, :], float32[:]),
-        (float64, float64, float64[:], float64[:], float64[:, :], float64[:]),
-    ],
-    "(),(),(n),(m),(n,m)->()",
-    cache=True,
-)
-def _interp2d(x, y, xp, yp, z, result):
-    """
-    Perform 2D bilinear interpolation on a regular grid.
-
-    Vectorized interpolation supporting both float32 and float64. Uses
-    bilinear interpolation within grid cells and handles edge cases by
-    clamping to boundary values.
-
-    Parameters
-    ----------
-    x : float or ndarray
-        X-coordinate(s) at which to interpolate.
-    y : float or ndarray
-        Y-coordinate(s) at which to interpolate.
-    xp : ndarray
-        Sorted 1D array of x-coordinates defining the grid.
-    yp : ndarray
-        Sorted 1D array of y-coordinates defining the grid.
-    z : ndarray
-        2D array of function values at grid points (shape: len(xp) x len(yp)).
-    result : ndarray
-        Output array for interpolated values.
-    """
-    xmax, ymax = int(len(xp) - 1), int(len(yp) - 1)
-    xidx = np.searchsorted(xp, x, "right")
-    yidx = np.searchsorted(yp, y, "right")
-
-    # Clamp indices and coordinates to the grid boundary.
-    if xidx == 0:
-        xidx = 1
-    if yidx == 0:
-        yidx = 1
-    if xidx > xmax:
-        xidx = xmax
-    if yidx > ymax:
-        yidx = ymax
-
-    # Get the coordinates for the surrounding box
-    left, right = xp[xidx - 1], xp[xidx]
-    bottom, top = yp[yidx - 1], yp[yidx]
-
-    # Clamp query point so _interp1d doesn't extrapolate beyond the edge.
-    x = max(left, min(right, x))
-    y = max(bottom, min(top, y))
-
-    # Get the values at the 4 surrounding points
-    z_left_bottom, z_right_bottom = z[xidx - 1, yidx - 1], z[xidx, yidx - 1]
-    z_left_top, z_right_top = z[xidx - 1, yidx], z[xidx, yidx]
-
-    z_bottom = _interp1d(x, left, right, z_left_bottom, z_right_bottom)
-    z_top = _interp1d(x, left, right, z_left_top, z_right_top)
-
-    # And return the interpolation between the low and high
-    result[0] = _interp1d(y, bottom, top, z_bottom, z_top)
-
-
-def map2nside(skymap: npt.NDArray[np.floating]) -> int:
-    """
-    Compute HEALPix nside parameter from skymap size.
-
-    Parameters
-    ----------
-    skymap : ndarray
-        HEALPix map array.
-
-    Returns
-    -------
-    int
-        HEALPix nside parameter (npix = 12 * nside^2).
-    """
-    return int(np.sqrt(len(skymap) / 12))
-
-
-@njit
+@njit(cache=True)
 def angular_distance(
     src_ra: Union[float, npt.NDArray[np.floating]],
     src_dec: Union[float, npt.NDArray[np.floating]],
@@ -144,10 +60,50 @@ def angular_distance(
         Angular separation(s) in radians.
     """
     cosDist = np.cos(src_ra - ra) * np.cos(src_dec) * np.cos(dec) + np.sin(src_dec) * np.sin(dec)
-    return np.arccos(cosDist)  # type: ignore[no-any-return]
+    return np.arccos(np.minimum(np.maximum(cosDist, -1.0), 1.0))  # type: ignore[no-any-return]
 
 
-@njit
+@njit(cache=True)
+def _pre_mask_and_distance(
+    ra: npt.NDArray[np.floating],
+    dec: npt.NDArray[np.floating],
+    src_ra: float,
+    src_dec: float,
+    cutoff: float,
+    ra_span: float,
+) -> npt.NDArray[np.floating]:
+    """Single-pass rectangular pre-filter and haversine for the single-source case.
+
+    Combines the dec/RA bounding-box rejection and the exact angular distance
+    into one loop over events, reading each record's ra/dec once from the same
+    cache line. The haversine is evaluated only for events that survive both
+    pre-checks (~0.6% at 10°, ~0.15% at 5°).
+
+    Returns an array of length len(ra) where element i holds the angular
+    distance to the source when event i is within `cutoff`, and -1.0 otherwise.
+    """
+    n = len(ra)
+    dists = np.full(n, -1.0)
+    cos_src_dec = np.cos(src_dec)
+    sin_src_dec = np.sin(src_dec)
+    for i in prange(n):
+        if abs(dec[i] - src_dec) >= cutoff:
+            continue
+        ra_diff = abs(ra[i] - src_ra)
+        if ra_diff > np.pi:
+            ra_diff = 2 * np.pi - ra_diff
+        if ra_diff >= ra_span:
+            continue
+        cos_dist = np.cos(ra[i] - src_ra) * cos_src_dec * np.cos(dec[i]) + sin_src_dec * np.sin(
+            dec[i]
+        )
+        d = np.arccos(min(max(cos_dist, -1), 1))
+        if d < cutoff:
+            dists[i] = d
+    return dists
+
+
+@njit(cache=True)
 def meshgrid2d(
     a: npt.NDArray[np.floating], b: npt.NDArray[np.floating]
 ) -> Tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:

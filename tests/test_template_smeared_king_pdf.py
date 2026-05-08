@@ -25,7 +25,7 @@ LMAX = 3 * NSIDE - 1  # 95
 # Start alpha at 1e-2 rad (~0.57 deg): values below ~theta_grid[1]=1e-4 cause the
 # trapezoid rule to miss the PSF core in the first bin, so b_0 deviates from 1.
 POINTS_ALPHA = np.logspace(-2, np.log10(np.pi) + 1e-2, 20)
-POINTS_BETA = np.logspace(0, 1, 20)
+POINTS_BETA = np.logspace(0, 1, 20) + 1e-5
 
 # A broad PSF that is well-resolved at nside=32 (~1.8 deg/pixel)
 ALPHA = np.radians(5.0)

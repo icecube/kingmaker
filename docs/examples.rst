@@ -4,8 +4,8 @@ Examples
 The ``examples/`` directory contains Jupyter notebooks demonstrating typical workflows.
 
 `basic_demo.ipynb <https://github.com/mjlarson/kingmaker/blob/main/examples/basic_demo.ipynb>`_
-    King PDF basics, parameter effects, normalization, sampling, and speed comparisons
-    between :class:`~kingmaker.pdf.KingPDF` and :class:`~kingmaker.pdf.InterpolatedKingPDF`.
+    King PDF basics, parameter effects, normalization, sampling, and speed benchmarks
+    for :class:`~kingmaker.pdf.KingPDF`.
 
 `fitting_demo.ipynb <https://github.com/mjlarson/kingmaker/blob/main/examples/fitting_demo.ipynb>`_
     Fitting King PSF parameters to Monte Carlo simulations using

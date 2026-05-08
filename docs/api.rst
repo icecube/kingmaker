@@ -9,17 +9,7 @@ PDF Classes
    :nosignatures:
 
    kingmaker.pdf.KingPDF
-   kingmaker.pdf.InterpolatedKingPDF
    kingmaker.pdf.TemplateSmearedKingPDF
-
-.. autoclass:: kingmaker.pdf.KingPDF
-   :members:
-
-.. autoclass:: kingmaker.pdf.InterpolatedKingPDF
-   :members:
-
-.. autoclass:: kingmaker.pdf.TemplateSmearedKingPDF
-   :members:
 
 Distribution
 ------------

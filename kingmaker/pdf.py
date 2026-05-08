@@ -7,7 +7,7 @@ from scipy.special import legendre_p_all, sph_harm_y_all
 
 from .distribution import _log10pi
 from .distribution import _norm, _unnormalized_pdf, _unnormalized_cdf
-from .utils import _interp2d, angular_distance, meshgrid2d
+from .utils import angular_distance, meshgrid2d
 
 
 class KingPDF:
@@ -76,12 +76,16 @@ class KingPDF:
             Normalized PDF value(s) with units of probability/steradian.
         """
         # Scalar-like: check if we can shortcut using the angular cutoff.
-        if np.isscalar(x):
-            if x > self.angular_cutoff:  # type: ignore[operator]
-                return 0
+        if np.isscalar(x) and (x > self.angular_cutoff):  # type: ignore[operator]
+            return 0
         elif isinstance(x, np.ndarray) and x.size == 1:
             if float(x.flat[0]) > self.angular_cutoff:
                 return 0
+
+        if np.any(alpha <= 0):
+            raise ValueError("Received alpha <= 0. The King distribution is not defined here.")
+        if np.any(beta <= 1):
+            raise ValueError("Received beta <= 1. The King distribution is not defined here.")
 
         # Broadcast
         x, alpha, beta = np.broadcast_arrays(x, alpha, beta)
@@ -132,6 +136,15 @@ class KingPDF:
             if float(x.flat[0]) > self.angular_cutoff:
                 return 1
 
+        if np.any(alpha <= 0):
+            raise ValueError(
+                "Received alpha <= 0. The King distribution is onlydefined for alpha > 0."
+            )
+        if np.any(beta <= 1):
+            raise ValueError(
+                "Received beta <= 1. The King distribution is onlydefined for beta > 1."
+            )
+
         # Broadcast
         x, alpha, beta = np.broadcast_arrays(x, alpha, beta)
 
@@ -181,6 +194,11 @@ class KingPDF:
         marginalized : ndarray
             Marginalized PDF values at each bin.
         """
+        if np.any(alpha <= 0):
+            raise ValueError("Received alpha <= 0. The PDF is not defined here.")
+        if np.any(beta <= 1):
+            raise ValueError("Received beta <= 1. The PDF is not defined here.")
+
         # Generate the sindec binning
         sindec = np.sin(dec)
         if nbins is None:
@@ -253,6 +271,12 @@ class KingPDF:
         ndarray
             Angular separations in radians, shape (n,).
         """
+
+        if np.any(alpha <= 0):
+            raise ValueError("Received alpha <= 0. The PDF is not defined here.")
+        if np.any(beta <= 1):
+            raise ValueError("Received beta <= 1. The PDF is not defined here.")
+
         if rng is None:
             rng = np.random.default_rng()
         psi_grid = np.linspace(1e-6, self.angular_cutoff, n_grid)
@@ -260,65 +284,7 @@ class KingPDF:
         return np.interp(rng.uniform(0, cdf_grid[-1], n), cdf_grid, psi_grid)
 
 
-class InterpolatedKingPDF(KingPDF):
-    """
-    King PDF with pre-computed normalization interpolation for efficiency.
-
-    Pre-calculates normalization constants on a grid of (alpha, beta) values
-    and uses 2D interpolation for fast norm() evaluations.
-
-    Parameters
-    ----------
-    angular_cutoff : float, optional
-        Maximum angular separation in radians. Default is pi.
-    points_alpha : ndarray, optional
-        Grid of alpha values for normalization interpolation. Unit: radians
-    points_beta : ndarray, optional
-        Grid of beta values for normalization interpolation.
-    """
-
-    def __init__(
-        self,
-        *,
-        angular_cutoff: float = np.pi,
-        points_alpha: npt.NDArray[np.floating] = np.logspace(-4, _log10pi + 1e-2, 200),
-        points_beta: npt.NDArray[np.floating] = np.logspace(0, 1, 200),
-    ) -> None:
-        super().__init__(angular_cutoff=angular_cutoff)
-        self.points_alpha, self.points_beta = points_alpha, points_beta
-        self.log10_points_alpha, self.log10_points_beta = (
-            np.log10(points_alpha),
-            np.log10(points_beta),
-        )
-        grid_alpha, grid_beta = np.meshgrid(self.points_alpha, self.points_beta)
-        norm_grid = cast(
-            npt.NDArray[np.floating], _norm(grid_alpha, grid_beta, self.angular_cutoff)
-        )
-        self.log10_grid_norms = np.log10(norm_grid.T)
-
-    def norm(
-        self,
-        alpha: Union[float, npt.NDArray[np.floating]],
-        beta: Union[float, npt.NDArray[np.floating]],
-    ) -> Union[float, npt.NDArray[np.floating]]:
-        if np.any(alpha < self.points_alpha[0]) or np.any(alpha > self.points_alpha[-1]):
-            raise ValueError(
-                f"Alpha value {alpha} must be within the interpolation grid: alpha in [{self.points_alpha[0]}, {self.points_alpha[-1]}]"
-            )
-        if np.any(beta < self.points_beta[0]) or np.any(beta > self.points_beta[-1]):
-            raise ValueError(
-                f"Beta value {beta} must be within the interpolation grid: beta in [{self.points_beta[0]}, {self.points_beta[-1]}]"
-            )
-        return 10 ** _interp2d(
-            np.log10(alpha),
-            np.log10(beta),
-            self.log10_points_alpha,
-            self.log10_points_beta,
-            self.log10_grid_norms,
-        )
-
-
-class TemplateSmearedKingPDF(InterpolatedKingPDF):
+class TemplateSmearedKingPDF(KingPDF):
     """
     King PDF convolved with a HEALPix template map using spherical harmonics.
 
@@ -370,7 +336,7 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         eval_ras: Optional[Union[float, npt.NDArray[np.floating]]] = None,
         angular_cutoff: float = np.pi,
         points_alpha: npt.NDArray[np.floating] = np.logspace(-4, _log10pi + 1e-2, 100),
-        points_beta: npt.NDArray[np.floating] = np.logspace(0, 1, 100),
+        points_beta: npt.NDArray[np.floating] = np.nextafter(np.logspace(0, 1, 100), np.inf),
         lmax: Optional[int] = None,
         interpolation_method: str = "nearest",
         memory_limit_gb: float = 1.0,
@@ -382,11 +348,25 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         self.interpolation_method = interpolation_method
         self.memory_limit_bytes = int(memory_limit_gb * 1e9)
 
-        super().__init__(
-            angular_cutoff=angular_cutoff,
-            points_alpha=points_alpha,
-            points_beta=points_beta,
-        )
+        super().__init__(angular_cutoff=angular_cutoff)
+
+        if np.any(points_alpha <= 0):
+            raise ValueError(
+                "Received points_alpha containing at least one point <= 0. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 0.0 when passing them into TemplateSmearedKingPDF."
+            )
+        if np.any(points_beta <= 1):
+            raise ValueError(
+                "Received points_beta containing at least one point <= 1. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 1.0 when passing them into TemplateSmearedKingPDF."
+            )
+        self.points_alpha = points_alpha
+        self.points_beta = points_beta
+        self.log10_points_alpha = np.log10(self.points_alpha)
+        self.log10_points_beta = np.log10(self.points_beta)
+
         self.nside = hp.npix2nside(len(skymap))
         self.lmax = (3 * self.nside - 1) if lmax is None else lmax
         self.mmax = self.lmax
@@ -527,16 +507,10 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         # Evaluate the King PDF over the full (n_alpha, n_beta, n_theta) grid.
         # Compute normalisation constants once per (alpha, beta) pair and broadcast
         # over theta, avoiding n_theta redundant norm lookups per grid point.
-        alpha_g, beta_g = np.meshgrid(self.points_alpha, self.points_beta, indexing="ij")
-        norms = 10 ** _interp2d(
-            np.log10(alpha_g),
-            np.log10(beta_g),
-            self.log10_points_alpha,
-            self.log10_points_beta,
-            self.log10_grid_norms,
-        )  # (n_alpha, n_beta)
+        alpha_grid, beta_grid = np.meshgrid(self.points_alpha, self.points_beta, indexing="ij")
+        norms = self.norm(alpha_grid, beta_grid)
         unnorm = _unnormalized_pdf(
-            theta[None, None, :], alpha_g[:, :, None], beta_g[:, :, None]
+            theta[None, None, :], alpha_grid[:, :, None], beta_grid[:, :, None]
         )  # (n_alpha, n_beta, n_theta)
         pdf_vals = norms[:, :, None] * unnorm
 
@@ -580,6 +554,18 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         ndarray
             Spherical harmonic coefficients b_l for degrees 0 to lmax.
         """
+        if np.any(alpha <= 0):
+            raise ValueError(
+                "Received alpha containing at least one point <= 0. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 0.0 when passing them into TemplateSmearedKingPDF."
+            )
+        if np.any(beta <= 1):
+            raise ValueError(
+                "Received beta containing at least one point <= 1. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 1.0 when passing them into TemplateSmearedKingPDF."
+            )
         log_a = np.log10(alpha)
         log_b = np.log10(beta)
         if self.interpolation_method == "nearest":
@@ -622,6 +608,18 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         ndarray
             Convolved HEALPix skymap at the same resolution as input.
         """
+        if np.any(alpha <= 0):
+            raise ValueError(
+                "Received alpha containing at least one point <= 0. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 0.0 when passing them into TemplateSmearedKingPDF."
+            )
+        if np.any(beta <= 1):
+            raise ValueError(
+                "Received beta containing at least one point <= 1. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 1.0 when passing them into TemplateSmearedKingPDF."
+            )
         b_l = self.get_king_b_l(alpha, beta)
         harmonic_convolution = hp.almxfl(alm=self.skymap_alm, fl=b_l, mmax=self.mmax, inplace=False)
         return hp.alm2map(harmonic_convolution, nside=self.nside, lmax=self.lmax, mmax=self.mmax)
@@ -647,6 +645,18 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         float or ndarray
             Convolved PDF value(s) at evaluation coordinates.
         """
+        if np.any(alpha <= 0):
+            raise ValueError(
+                "Received alpha containing at least one point <= 0. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 0.0 when passing them into TemplateSmearedKingPDF."
+            )
+        if np.any(beta <= 1):
+            raise ValueError(
+                "Received beta containing at least one point <= 1. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 1.0 when passing them into TemplateSmearedKingPDF."
+            )
         b_l = self.get_king_b_l(alpha, beta)
         return b_l @ self._c_l
 
@@ -706,6 +716,19 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         Samples land at HEALPix pixel centres. The positional resolution is
         therefore limited by the skymap pixelisation (~`hp.nside2resol(nside)`).
         """
+        if np.any(alpha <= 0):
+            raise ValueError(
+                "Received alpha containing at least one point <= 0. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 0.0 when passing them into TemplateSmearedKingPDF."
+            )
+        if np.any(beta <= 1):
+            raise ValueError(
+                "Received beta containing at least one point <= 1. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 1.0 when passing them into TemplateSmearedKingPDF."
+            )
+
         if rng is None:
             rng = np.random.default_rng()
 

@@ -8,36 +8,35 @@ A Python library for working with King/Moffat distributions for modeling point s
 
 ## Overview
 
-The **King distribution** (also known as the **Moffat distribution**, see [wikipedia](https://en.wikipedia.org/wiki/Moffat_distribution).) is a two-parameter probability distribution commonly used to describe the point spread function (PSF) of astronomical observations. The distribution has the form:
+The **King distribution** (also known as the **Moffat distribution**, see [wikipedia](https://en.wikipedia.org/wiki/Moffat_distribution).) is a two-parameter probability distribution commonly used to describe the point spread function (PSF) of astronomical observations. This package uses the exact spherical form:
 
 ```
-f(θ | α, β) ∝ [1 + (θ/α)² / (2β)]^(-β)
+f(theta | alpha, beta) ∝ [1 + (1 - cos(theta)) / (alpha^2 * beta)]^(-beta)
 ```
 
 where:
-- **θ** is the angular separation from the source
-- **α** (alpha) is the scale parameter controlling the width of the distribution
-- **β** (beta) is the shape parameter controlling the tail behavior
+- **theta** is the angular separation from the source
+- **alpha** is the scale parameter controlling the width of the distribution
+- **beta** is the shape parameter controlling the tail behavior (must be > 1)
 
-The distribution's flexibility in modeling both the core and tail regions makes it particularly well-suited for modeling extended tails to point spread functions. These are common in many instruments in astronomy. The King distribution offers significant advantages over simpler models (e.g., Gaussian or Rayleigh) by providing independent control over the core width (α) and tail weight (β), allowing more accurate modeling of real detector responses. 
+The substitution `t = 1 - cos(theta)`, `dt = sin(theta) dtheta` yields an exact closed-form CDF, making both normalization and cumulative probabilities analytically tractable at all angular scales. For small angles, `1 - cos(theta) ~ theta^2/2`, recovering the familiar flat-sky form. In the limit beta -> inf the distribution converges to a Gaussian.
 
-Note that in the limit of β → ∞, this distribution reproduces the standard Rayleigh distribution. 
+The distribution's flexibility in modeling both the core and tail regions makes it particularly well-suited for modeling extended tails to point spread functions. These are common in many instruments in astronomy. The King distribution offers significant advantages over simpler models (e.g., Gaussian or Rayleigh) by providing independent control over the core width (alpha) and tail weight (beta), allowing more accurate modeling of real detector responses.
 
-This package implements the King/Moffat distribution on a sphere. Normalizations are numerically calculated at initialization and linearly interpolated at runtime. The current implementation includes support for
+This package implements the King/Moffat distribution on a sphere. The current implementation includes support for
 
-- Direct KingPDF evaluations with normalizations calculated at runtime
-- KingPDF evaluations with normalizations interpolated from tables calculated at intialization
+- KingPDF evaluations with exact analytic normalizations and CDFs
 - Numerically calculated "signal subtraction" PDFs
-- Preliminary healpix map convolutions and template support using spherical convolutions
+- HEALPix map convolutions and template support using spherical harmonics
 
 ## Features
 
-- **Efficient normalization**: Accurate integration over spherical caps with arbitrary cutoffs
+- **Exact normalization**: Closed-form analytic normalization and CDF via spherical geometry, valid at all angular scales
 - **Vectorized operations**: NumPy broadcasting for simultaneous evaluation at multiple points
-- **Interpolation caching**: Pre-computed normalizations for 10-200× speedup
+- **JIT-compiled kernels**: All inner-loop functions compiled and cached with numba for near-native performance
 - **Multi-dimensional fitting**: Parameterize PSF as function of energy, declination, angular error, etc.
 - **Signal subtraction**: Built-in RA marginalization for likelihood-based analyses
-- **Template smearing**: Incorporate diffuse backgrounds and Galactic plane effects
+- **Template smearing**: Incorporate diffuse backgrounds and Galactic plane effects via spherical harmonics
 - **Flexible binning**: Support for both equal-probability and explicit bin edges
 
 ## Installation
@@ -87,22 +86,6 @@ containment_68 = brentq(
 )
 print(f"68% containment: {np.degrees(containment_68):.2f} degrees")
 ```
-
-### Interpolated PDF for Speed
-
-For applications requiring many PDF evaluations, use `InterpolatedKingPDF` which pre-computes normalizations on a grid:
-
-```python
-from kingmaker.pdf import InterpolatedKingPDF
-
-# Create interpolated version (10-200x faster)
-king_interp = InterpolatedKingPDF(angular_cutoff=np.pi)
-
-# Use identical interface
-pdf_values = king_interp.pdf(angles, alpha, beta)
-```
-
-The interpolated version provides **10-200× speedup** with **< 0.1% error** for most parameter values.
 
 ### Fitting PSF Parameters to Monte Carlo
 
@@ -165,24 +148,23 @@ sindec_bins, pdf_marginalized = king.marginalize(source_dec, alpha, beta)
 
 ### Template Smearing
 
-Apply Galactic or other template smearing to the PSF:
+Apply a HEALPix template (e.g. Galactic diffuse emission) to the PSF via spherical harmonic convolution:
 
 ```python
 from kingmaker.pdf import TemplateSmearedKingPDF
+import healpy as hp
 
-# Load a diffuse template (e.g., Galactic plane emission)
-template = np.load('galactic_template.npy')  # HEALPix map
+# Load a diffuse template as a HEALPix map
+skymap = hp.read_map('galactic_template.fits')
 
-# Create smeared PSF
-king_smeared = TemplateSmearedKingPDF(
-    angular_cutoff=np.pi,
-    template=template,
-    nside=128
-)
+# Create smeared PSF (pre-computes spherical harmonic expansion at init)
+king_smeared = TemplateSmearedKingPDF(skymap, angular_cutoff=np.pi)
 
-# Evaluate PDF including template effects
-ra, dec = np.radians(120), np.radians(30)  # Source position
-pdf_smeared = king_smeared.pdf(angles, ra, dec, alpha, beta)
+# Set evaluation coordinates, then convolve
+eval_ras  = np.radians([0.0, 45.0, 90.0])
+eval_decs = np.radians([0.0, 30.0, -15.0])
+king_smeared.set_coordinates(eval_decs, eval_ras)
+pdf_vals = king_smeared.convolve_at_grid_point(alpha, beta)
 ```
 
 

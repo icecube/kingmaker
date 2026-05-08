@@ -13,6 +13,7 @@ dependencies = [
     'numba',
     'matplotlib',
     'healpy',
+    'tqdm',
 ]
 dynamic = ["version"]
 

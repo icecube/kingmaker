@@ -4,11 +4,10 @@ import numpy.typing as npt
 from os.path import exists
 import logging
 import numpy as np
-import healpy as hp
 
-from .pdf import InterpolatedKingPDF, TemplateSmearedKingPDF
+from .pdf import KingPDF
 from .fitting import KingPSFFitter
-from .utils import angular_distance, _interp1d
+from .utils import angular_distance, _pre_mask_and_distance, _interp1d
 
 
 class KingSpatialLikelihood:
@@ -32,17 +31,16 @@ class KingSpatialLikelihood:
     cache_name: str = "king_parameters_cache.npz"
 
     # Store an instance of the PDF class to use for evaluations. This will be
-    # either a InterpolatedKingPDF (point source) or a TemplateSmearedKingPDF
-    # (extended source with skymap).
-    king_pdf: InterpolatedKingPDF
-    template_pdf: TemplateSmearedKingPDF
-    nside: int
+    # either a KingPDF for standard point source searches
+    king_pdf: KingPDF
+
+    # Source-level information
+    source_ras: Optional[npt.NDArray[Any]] = None
+    source_decs: Optional[npt.NDArray[Any]] = None
 
     # Have some place to cache the per-event information so we don't need to
     # recalculate it every time we evaluate the PDF.
     events: Optional[Any] = None
-    event_alpha: Dict[float, npt.NDArray[np.floating]]
-    event_beta: Dict[float, npt.NDArray[np.floating]]
     event_distances: Union[npt.NDArray[np.floating], List[float]]
     map_index: Union[npt.NDArray[np.integer], List[int]]
     event_pvalue: Dict[float, Union[List, npt.NDArray[np.floating]]]
@@ -63,9 +61,10 @@ class KingSpatialLikelihood:
             4.0,
         ],
         angular_cutoff: float = np.pi,
-        skymap: Union[npt.NDArray[np.floating], None] = None,
         cache_parameters: bool = True,
         cache_name: str = "./king_parameters_cache.npz",
+        remove_weight_outliers=True,
+        weight_outlier_percentiles=(0, 95),
         weight_field: str = "ow",
         true_ra_name: str = "trueRa",
         true_dec_name: str = "trueDec",
@@ -78,10 +77,8 @@ class KingSpatialLikelihood:
         # the parametrization bins later, since the user may have simply
         # passed in a number of bins instead of actual bin edges.
         self.spectral_indices = np.atleast_1d(spectral_indices)
-        self.skymap = skymap
 
         # Set some default values for the event-level parameters.
-        self.event_alpha, self.event_beta = {}, {}
         self.event_distances, self.map_index = [], []
         self.event_pvalue = {}
 
@@ -104,6 +101,8 @@ class KingSpatialLikelihood:
                 minimum_counts=minimum_counts,
                 spectral_indices=spectral_indices,
                 angular_cutoff=np.pi,
+                remove_weight_outliers=remove_weight_outliers,
+                weight_outlier_percentiles=weight_outlier_percentiles,
                 weight_field=weight_field,
                 true_ra_name=true_ra_name,
                 true_dec_name=true_dec_name,
@@ -131,119 +130,113 @@ class KingSpatialLikelihood:
         self.alpha_values = fitted_parameters["alpha"]
         self.beta_values = fitted_parameters["beta"]
 
-        # Instantiate the PDF object. If we have a template, use the template-smoothed
-        # PDF; otherwise, use the standard interpolated PDF.
-        if self.skymap is not None:
-            self.nside = hp.npix2nside(len(self.skymap))
-            self.template_pdf = TemplateSmearedKingPDF(
-                skymap=self.skymap, angular_cutoff=angular_cutoff
-            )
-        else:
-            self.king_pdf = InterpolatedKingPDF(angular_cutoff=angular_cutoff)
-
+        # Instantiate the PDF object.
+        self.king_pdf = KingPDF(angular_cutoff=angular_cutoff)
         return
 
-    def events_match(self, events: npt.NDArray[Any]):
+    def _events_match(self, events: npt.NDArray[Any]) -> bool:
         if self.events is None:
             return False
-        return np.array_equal(self.events["ra"], events["ra"]) and np.array_equal(
-            self.events["dec"], events["dec"]
+        if events is None:
+            return True
+        if len(self.events) != len(events):
+            return False
+        result = np.array_equal(self.events["ra"][::10], events["ra"][::10])
+        result &= np.array_equal(self.events["dec"][::10], events["dec"][::10])
+        return result
+
+    def _sources_match(self, source_ras: npt.NDArray[Any], source_decs: npt.NDArray[Any]) -> bool:
+        if self.source_ras is None:
+            return False
+        if self.source_decs is None:
+            return False
+        if source_ras is None:
+            return True
+        if source_decs is None:
+            return True
+        if len(self.source_ras) != len(source_ras):
+            return False
+        if len(self.source_decs) != len(source_decs):
+            return False
+        return np.array_equal(self.source_ras, source_ras) and np.array_equal(
+            self.source_decs, source_decs
         )
 
     def set_events(
         self,
         events: npt.NDArray[Any],
-        source_ras: Optional[npt.NDArray[np.floating]] = None,
-        source_decs: Optional[npt.NDArray[np.floating]] = None,
+        source_ras: Optional[npt.NDArray[np.floating]],
+        source_decs: Optional[npt.NDArray[np.floating]],
     ) -> None:
-        """Calculate the King distribution parameters (alpha and beta) for a given set of events by interpolating
-        the fitted parameters based on the event parameters and the provided binning. Then calculate the pvalues
-        for each spectral index for each event and store them so we can interpolate them at runtime.
+        """Calculate per-event pvalues for each spectral index by interpolating
+        the King PDF at the nearest parametrization bin for each event.
         """
-        if self.events_match(events):
+        if self._events_match(events) and self._sources_match(source_ras, source_decs):
             return
 
         self.events = events
         self.source_ras = source_ras
         self.source_decs = source_decs
 
-        # The source_ras and source_decs must be specified unless we're using the
-        # template PDF. Ensure that this is the case and raise an error if not.
-        if self.skymap is None and (source_ras is None or source_decs is None):
-            raise ValueError(
-                "This instance of the KingSpatialLikelihood was not configured with"
-                " a skymap, suggesting that this should be a point source analysis."
-                " However, no source locations were provided. Please ensure that"
-                " source_ras and source_decs are provided when calling set_events."
-            )
-
         # Make sure we have a matching number of source_ras and source_decs if we're given multiple sources.
-        if (source_ras is not None and source_decs is not None) and (
-            len(source_ras) != len(source_decs)
-        ):
+        if (source_ras is None) and (source_decs is None):
+            raise ValueError(
+                "No source_ras and source_decs were provided to the set_eventsfunction."
+            )
+        if (source_ras is None or source_decs is None) or (len(source_ras) != len(source_decs)):
             raise ValueError(
                 "The number of source_ras and source_decs must match. Please ensure "
                 "that these arrays have the same length when passing into set_events."
             )
 
-        # Interpolate to get the alpha and beta values for each spectral index for
-        # each event in the given sample.
+        if (not self.multiple_source_warning_logged) and (len(source_ras) > 1):
+            logging.warning(
+                "Multiple source positions provided. This has not been tested and"
+                " may not work as expected. Please check the results carefully!"
+            )
+            self.multiple_source_warning_logged = True
+
+        # Calculate angular distances and build event_mask. For the common
+        # single-source case with a sub-pi cutoff, a single compiled numba pass
+        # does the rectangular (dec, RA) pre-filter and the haversine together,
+        # reading each event's ra/dec only once.
+        cutoff = self.king_pdf.angular_cutoff
+        if len(source_ras) == 1 and cutoff < np.pi:
+            src_ra = float(source_ras[0])
+            src_dec = float(source_decs[0])
+            ra_span = min(cutoff / max(abs(np.cos(src_dec)), np.sin(cutoff)), np.pi)
+            dists_all = _pre_mask_and_distance(
+                events["ra"], events["dec"], src_ra, src_dec, cutoff, ra_span
+            )
+            self.event_mask = dists_all >= 0
+            self.event_distances = dists_all[self.event_mask]
+        else:
+            all_dists = angular_distance(events["ra"], events["dec"], source_ras, source_decs)
+            self.event_mask = all_dists < cutoff
+            self.event_distances = all_dists[self.event_mask]
+
+        # Nearest-bin lookup. Field-first masking (events[key][mask]) avoids
+        # copying the full structured array before extracting each field.
         def index(centers, values):
             i = np.searchsorted(centers, values).clip(1, len(centers) - 1)
             return np.where(values - centers[i - 1] < centers[i] - values, i - 1, i)
 
-        event_indices = [index(self.bin_centers[i], events[key]) for i, key in enumerate(self.keys)]
+        event_indices = tuple(
+            index(self.bin_centers[i], events[key][self.event_mask])
+            for i, key in enumerate(self.keys)
+        )
+
+        all_alpha = self.alpha_values[(slice(None), *event_indices)]
+        all_beta = self.beta_values[(slice(None), *event_indices)]
+        all_pvalues = self.king_pdf.pdf(self.event_distances, all_alpha, all_beta)
         for i, gamma in enumerate(self.spectral_indices):
-            self.event_alpha[gamma] = self.alpha_values[i][*event_indices]
-            self.event_beta[gamma] = self.beta_values[i][*event_indices]
+            self.event_pvalue[gamma] = all_pvalues[i]
 
-        # Start calculating the pvalues.
-        # TODO: By assuming keys "ra" and "dec" exist and are usable here, we're
-        # implicitly building in an IceCube-centric assumption. Ideally, we want
-        # to make this code more generic. This will require us to accept the names
-        # of these as configurable parameters.
-
-        # If we're using a skymap, then we can calculate the bin
-        # index for each event now.
-        if self.skymap is not None:
-            self.map_index = hp.ang2pix(self.nside, events["dec"], events["ra"], lonlat=True)
-            # TODO: How can I calculate the pvalues for the PDF-convolved skymap without calculating
-            # each event individually? This needs to be done efficiently, but I'm not yet sure how
-            # to do that. I suppose I could calculate the alm values for a grid of alpha/beta values?
-            # That should at least be less expensive to store in memory and still be reasonable efficient
-            # if I need to do evaluations, but it's still going to be slower than I'd like.
-            raise NotImplementedError(
-                "Interpolated pvalues for the template-smoothed PDF are not yet implemented."
-            )
-
-        # Otherwise, we can calculate the angular separation for each event now.
-        # TODO: Ensure the broadcasting works properly here if we have multiple sources...
-        else:
-            assert source_ras is not None
-            self.event_distances = angular_distance(
-                events["ra"], events["dec"], source_ras, source_decs
-            )
-            if (not self.multiple_source_warning_logged) and (len(source_ras) > 1):
-                logging.warning(
-                    "Multiple source positions provided. This has not been tested and"
-                    " may not work as expected. Please check the results carefully!"
-                )
-                self.multiple_source_warning_logged = True
-            for gamma in self.spectral_indices:
-                self.event_pvalue[gamma] = self.king_pdf.pdf(
-                    self.event_distances, self.event_alpha[gamma], self.event_beta[gamma]
-                )  # type: ignore[assignment, arg-type]
         return
 
     def evaluate_pdf(self, events: npt.NDArray[Any], gamma: float = 2) -> npt.NDArray[np.floating]:
         # If we haven't already calculated the per-event alpha and beta parameters, do so now.
-        if len(self.event_alpha) == 0 or len(self.event_beta) == 0:
-            raise RuntimeError(
-                "Events have not been configured yet. Call set_events with the appropriate events"
-                " for this trial and source locations before evaluating the PDF."
-            )
-
-        if not self.events_match(events):
+        if not self._events_match(events):
             raise RuntimeError(
                 "The events provided to evaluate_pdf do not match the events that were used to calculate the per-event parameters."
                 " Please ensure that you call set_events with the same events that you later pass into evaluate_pdf."
@@ -255,7 +248,8 @@ class KingSpatialLikelihood:
         )
 
         gamma_low, gamma_high = self.spectral_indices[idx], self.spectral_indices[idx + 1]
-        result = _interp1d(
+        result = np.zeros(len(self.events))
+        result[self.event_mask] = _interp1d(
             gamma,
             gamma_low,
             gamma_high,

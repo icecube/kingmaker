@@ -12,13 +12,13 @@ import pytest
 from numpy.testing import assert_allclose
 
 from kingmaker.fitting import KingPSFFitter
-from kingmaker.pdf import InterpolatedKingPDF
+from kingmaker.pdf import KingPDF
 
 
 RNG_SEED = 42
 
 # One shared PDF instance to avoid re-building the 200×200 norm grid per test.
-_KING_PDF = InterpolatedKingPDF()
+_KING_PDF = KingPDF()
 
 
 def _make_events(n, alpha, beta, aux_field, aux_vals, rng):
