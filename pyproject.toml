@@ -24,6 +24,7 @@ dev = [
   "mypy",
   "pytest",
   "pytest-cov",
+  "sybil",
 ]
 docs = [
   "sphinx",
@@ -82,7 +83,7 @@ addopts = [
     "--strict-markers",
     "--strict-config",
 ]
-testpaths = ["tests"]
+testpaths = ["tests", "docs"]
 pythonpath = ["."]
 
 [tool.coverage.run]

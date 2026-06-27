@@ -169,8 +169,40 @@ class KingSpatialLikelihood:
         source_ras: Optional[npt.NDArray[np.floating]],
         source_decs: Optional[npt.NDArray[np.floating]],
     ) -> None:
-        """Calculate per-event pvalues for each spectral index by interpolating
-        the King PDF at the nearest parametrization bin for each event.
+        """
+        Cache per-event King PDF values for each spectral index ahead of a call
+        to :meth:`evaluate_pdf`.
+
+        For each event, the nearest parametrization bin is looked up to obtain
+        per-event alpha/beta parameters, the angular distance to the source is
+        computed, and the King PDF is evaluated and cached for every spectral
+        index in ``spectral_indices``. This must be called before
+        :meth:`evaluate_pdf`. Calling it again with the same ``events``,
+        ``source_ras``, and ``source_decs`` as the previous call is a cheap
+        no-op, so it is safe to call once per trial without checking first.
+
+        Parameters
+        ----------
+        events : structured array
+            Data events to evaluate. Must contain ``ra`` and ``dec`` fields
+            (reconstructed equatorial coordinates, in radians) plus any fields
+            referenced by ``parametrization_bins``.
+        source_ras : ndarray
+            Source right ascension(s) in radians.
+        source_decs : ndarray
+            Source declination(s) in radians. Must have the same length as
+            ``source_ras``.
+
+        Raises
+        ------
+        ValueError
+            If ``source_ras``/``source_decs`` are not provided, or their
+            lengths do not match.
+
+        Notes
+        -----
+        Support for multiple simultaneous sources is experimental and logs a
+        one-time warning; results should be checked carefully in that case.
         """
         if self._events_match(events) and self._sources_match(source_ras, source_decs):
             return
@@ -225,6 +257,32 @@ class KingSpatialLikelihood:
         return
 
     def get_alpha_beta(self, events, copy=True):
+        """
+        Look up fitted alpha/beta parameters for each event via nearest-bin lookup.
+
+        This is a lower-level accessor used internally by :meth:`set_events`;
+        most users will call :meth:`evaluate_pdf` instead. Useful for
+        inspecting the fitted King parameters assigned to specific events.
+
+        Parameters
+        ----------
+        events : structured array
+            Events to look up. Must contain the fields referenced by
+            ``parametrization_bins``. Only events selected by the mask set in
+            the most recent :meth:`set_events` call are returned.
+        copy : bool, optional
+            Currently unused; fancy-indexing into the stored alpha/beta grids
+            already returns new arrays regardless of this flag. Default is
+            True.
+
+        Returns
+        -------
+        alpha : ndarray, shape (n_gamma, n_masked_events)
+            Fitted alpha values for each spectral index and event.
+        beta : ndarray, shape (n_gamma, n_masked_events)
+            Fitted beta values for each spectral index and event.
+        """
+
         # Nearest-bin lookup. Field-first masking (events[key][mask]) avoids
         # copying the full structured array before extracting each field.
         def index(centers, values):
@@ -241,6 +299,37 @@ class KingSpatialLikelihood:
         return alpha, beta
 
     def get_alpha_beta_gamma(self, gamma, events=None, alpha=None, beta=None):
+        """
+        Get alpha/beta at a given spectral index, interpolating if necessary.
+
+        If ``gamma`` matches one of the spectral indices the parameters were
+        fit at, the stored values are returned directly. Otherwise, alpha and
+        beta are linearly interpolated between the two bracketing spectral
+        indices.
+
+        Parameters
+        ----------
+        gamma : float
+            Spectral index at which to evaluate alpha/beta. Can be any value;
+            values outside the range of ``spectral_indices`` are extrapolated
+            from the nearest bracketing pair.
+        events : structured array, optional
+            Events to look up alpha/beta for via :meth:`get_alpha_beta`. Only
+            used if ``alpha``/``beta`` are not already provided.
+        alpha : ndarray, optional
+            Pre-computed alpha values for all spectral indices, e.g. from
+            :meth:`get_alpha_beta`. If provided, ``events`` is ignored.
+        beta : ndarray, optional
+            Pre-computed beta values for all spectral indices, matching
+            ``alpha``.
+
+        Returns
+        -------
+        alpha_gamma : ndarray or float
+            Alpha value(s) at the requested spectral index.
+        beta_gamma : ndarray or float
+            Beta value(s) at the requested spectral index.
+        """
         if alpha is None:
             assert events is not None
             alpha, beta = self.get_alpha_beta(events, copy=False)
@@ -272,6 +361,36 @@ class KingSpatialLikelihood:
         )
 
     def evaluate_pdf(self, events: npt.NDArray[Any], gamma: float = 2) -> npt.NDArray[np.floating]:
+        """
+        Evaluate the King PDF at each event's position for a given spectral index.
+
+        Uses the per-event distances and PDF values cached by the most recent
+        call to :meth:`set_events`, interpolating over spectral index as
+        needed. This makes repeated calls with different ``gamma`` values
+        cheap once :meth:`set_events` has been called for a given event set.
+
+        Parameters
+        ----------
+        events : structured array
+            Data events to evaluate. Must be the same events most recently
+            passed to :meth:`set_events`.
+        gamma : float, optional
+            Spectral index at which to evaluate the PDF. Default is 2.0.
+            Interpolated between the bracketing values in ``spectral_indices``
+            if not an exact match.
+
+        Returns
+        -------
+        ndarray
+            PDF value(s) (probability/steradian) for each event in ``events``,
+            in the same order. Zero for events outside the angular cutoff.
+
+        Raises
+        ------
+        RuntimeError
+            If ``events`` does not match the events passed to the most recent
+            call to :meth:`set_events`.
+        """
         # If we haven't already calculated the per-event alpha and beta parameters, do so now.
         if not self._events_match(events):
             raise RuntimeError(

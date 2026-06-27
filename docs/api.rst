@@ -11,12 +11,6 @@ PDF Classes
    kingmaker.pdf.KingPDF
    kingmaker.pdf.TemplateSmearedKingPDF
 
-Distribution
-------------
-
-.. automodule:: kingmaker.distribution
-   :members:
-
 Fitting
 -------
 

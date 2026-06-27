@@ -83,6 +83,28 @@ jobs:
           fail_ci_if_error: true
         continue-on-error: true  # Don't fail CI if Codecov upload fails
           
+  docs-examples:
+    name: Run documentation examples
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run code blocks from the docs as tests
+        run: |
+          pytest docs/ -v
+
   build:
     name: Build Distribution
     runs-on: ubuntu-latest

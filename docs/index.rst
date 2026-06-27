@@ -24,6 +24,7 @@ spherical-harmonic convolution with HEALPix template maps.
    :caption: Contents
 
    installation
+   quickstart
    api
 
 .. toctree::
