@@ -49,6 +49,47 @@ class KingPDF:
         """
         return _norm(alpha, beta, self.angular_cutoff)
 
+    def pdf_from_norm(
+        self,
+        x: Union[float, npt.NDArray[np.floating]],
+        alpha: Union[float, npt.NDArray[np.floating]],
+        beta: Union[float, npt.NDArray[np.floating]],
+        norm: Union[float, npt.NDArray[np.floating]],
+    ) -> Union[float, npt.NDArray[np.floating]]:
+        """
+        Evaluate the King kernel given a precomputed normalization constant.
+
+        Equivalent to ``norm * unnormalized_pdf(x, alpha, beta)``, skipping
+        the alpha/beta validation, angular-cutoff masking, and norm
+        computation that :meth:`pdf` performs. Intended for callers that
+        have already validated alpha/beta (e.g. against a previously-fit
+        parameter grid) and already filtered ``x`` to be within
+        ``self.angular_cutoff``, and that can compute norm once over a
+        smaller deduplicated (alpha, beta) grid than ``len(x)`` -- e.g.
+        :meth:`kingmaker.wrapper.KingSpatialLikelihood.set_events`.
+
+        Parameters
+        ----------
+        x : float or ndarray
+            Angular separation(s) in radians. Must already be
+            ``<= self.angular_cutoff``; this is NOT checked.
+        alpha : float or ndarray
+            King distribution alpha parameter (scale) in radians. Must
+            already be > 0; this is NOT checked.
+        beta : float or ndarray
+            King distribution beta parameter (tail weight). Must already
+            be > 1; this is NOT checked.
+        norm : float or ndarray
+            Precomputed normalization constant(s), e.g. from :meth:`norm`.
+
+        Returns
+        -------
+        float or ndarray
+            ``norm * unnormalized_pdf(x, alpha, beta)``, broadcast over
+            inputs.
+        """
+        return norm * _unnormalized_pdf(x, alpha, beta)
+
     def pdf(
         self,
         x: Union[float, npt.NDArray[np.floating]],

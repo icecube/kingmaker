@@ -133,6 +133,15 @@ class KingSpatialLikelihood:
 
         # Instantiate the PDF object.
         self.king_pdf = KingPDF(angular_cutoff=angular_cutoff)
+
+        # Precompute the normalization constant for every (gamma, bin)
+        # combination on the small fitted grid once per process. set_events
+        # gathers per-event norm from this array via the same nearest-bin
+        # indices used for alpha/beta, instead of recomputing the same
+        # closed-form norm independently for every event that shares a bin
+        # (most events in a trial do, since the grid is much smaller than
+        # the event count).
+        self.norm_values = self.king_pdf.norm(self.alpha_values, self.beta_values)
         return
 
     def _events_match(self, events: npt.NDArray[Any]) -> bool:
@@ -248,13 +257,54 @@ class KingSpatialLikelihood:
             self.event_mask = all_dists < cutoff
             self.event_distances = all_dists[self.event_mask]
 
-        self._result_buffer = np.zeros(len(events))
+        # Reuse the buffer across trials when the event count hasn't
+        # changed, instead of reallocating every call. Either way, the
+        # buffer is always fully zeroed here: the masked-out region is
+        # write-only-once (only evaluate_pdf writes, and only at
+        # [self.event_mask] positions), so this is the only place a stale
+        # value from a previous trial's different mask could otherwise leak
+        # through.
+        if len(self._result_buffer) != len(events):
+            self._result_buffer = np.zeros(len(events))
+        else:
+            self._result_buffer[:] = 0.0
 
-        all_alpha, all_beta = self.get_alpha_beta(events, copy=False)
+        all_alpha, all_beta, all_norm = self._lookup_event_grid(events)
         for i, gamma in enumerate(self.spectral_indices):
-            alpha, beta = self.get_alpha_beta_gamma(gamma, alpha=all_alpha, beta=all_beta)
-            self.event_pvalue[gamma] = self.king_pdf.pdf(self.event_distances, alpha, beta)
+            # alpha/beta are from the fitted grid (already validated at fit
+            # time) and event_distances is already <= angular_cutoff by
+            # construction above, so bypass KingPDF.pdf()'s validation/
+            # masking and go straight to the kernel using the precomputed
+            # per-bin norm. `i` is already the correct row (spectral_indices
+            # and the leading axis of alpha_values/beta_values/norm_values
+            # are index-aligned 1:1), so there's no need to go through
+            # get_alpha_beta_gamma's searchsorted + defensive copy here.
+            self.event_pvalue[gamma] = self.king_pdf.pdf_from_norm(
+                self.event_distances, all_alpha[i], all_beta[i], all_norm[i]
+            )
         return
+
+    def _lookup_event_grid(self, events):
+        """
+        Nearest-bin lookup of alpha, beta, and norm for each (unmasked) event.
+
+        Shared by :meth:`get_alpha_beta` and :meth:`set_events` so the
+        nearest-bin index computation is only ever done once per call.
+        """
+
+        # Nearest-bin lookup. Field-first masking (events[key][mask]) avoids
+        # copying the full structured array before extracting each field.
+        def index(centers, values):
+            i = np.searchsorted(centers, values).clip(1, len(centers) - 1)
+            return np.where(values - centers[i - 1] < centers[i] - values, i - 1, i)
+
+        event_indices = tuple(
+            index(self.bin_centers[i], events[key][self.event_mask])
+            for i, key in enumerate(self.keys)
+        )
+
+        idx = (slice(None), *event_indices)
+        return self.alpha_values[idx], self.beta_values[idx], self.norm_values[idx]
 
     def get_alpha_beta(self, events, copy=True):
         """
@@ -282,20 +332,7 @@ class KingSpatialLikelihood:
         beta : ndarray, shape (n_gamma, n_masked_events)
             Fitted beta values for each spectral index and event.
         """
-
-        # Nearest-bin lookup. Field-first masking (events[key][mask]) avoids
-        # copying the full structured array before extracting each field.
-        def index(centers, values):
-            i = np.searchsorted(centers, values).clip(1, len(centers) - 1)
-            return np.where(values - centers[i - 1] < centers[i] - values, i - 1, i)
-
-        event_indices = tuple(
-            index(self.bin_centers[i], events[key][self.event_mask])
-            for i, key in enumerate(self.keys)
-        )
-
-        alpha = self.alpha_values[(slice(None), *event_indices)]
-        beta = self.beta_values[(slice(None), *event_indices)]
+        alpha, beta, _ = self._lookup_event_grid(events)
         return alpha, beta
 
     def get_alpha_beta_gamma(self, gamma, events=None, alpha=None, beta=None):
@@ -336,28 +373,26 @@ class KingSpatialLikelihood:
         assert len(alpha) == len(beta)
 
         # If we have this gamma, just return it. Make sure to use copy()
-        # so the caller doesn't get a reference into our array.
+        # so the caller doesn't get a reference into our array. Note:
+        # searchsorted's default side="left" already returns the exact
+        # index of an exact match in a sorted array -- no "-1" needed here
+        # (that would be an off-by-one, wrapping to the previous row).
         if gamma in self.spectral_indices:
-            gamma_idx = np.searchsorted(self.spectral_indices, gamma) - 1
+            gamma_idx = np.searchsorted(self.spectral_indices, gamma)
             return alpha[gamma_idx].copy(), beta[gamma_idx].copy()
 
-        # Otherwise, we want to interpolate.
-        gamma_low = max(np.searchsorted(self.spectral_indices, gamma) - 1, 0)
-        gamma_high = min(gamma_low, len(self.spectral_indices - 1))
+        # Otherwise, interpolate between the bracketing pair of spectral
+        # indices, clamping so the pair is always valid even when gamma is
+        # outside the stored range (extrapolation from the nearest pair).
+        # Mirrors evaluate_pdf's bracketing logic.
+        idx = np.clip(
+            np.searchsorted(self.spectral_indices, gamma) - 1, 0, len(self.spectral_indices) - 2
+        )
+        gamma_low, gamma_high = self.spectral_indices[idx], self.spectral_indices[idx + 1]
 
         return (
-            _interp1d(
-                self.spectral_indices[gamma_low],
-                self.spectral_indices[gamma_high],
-                alpha[gamma_low],
-                alpha[gamma_high],
-            ),
-            _interp1d(
-                self.spectral_indices[gamma_low],
-                self.spectral_indices[gamma_high],
-                beta[gamma_low],
-                beta[gamma_high],
-            ),
+            _interp1d(gamma, gamma_low, gamma_high, alpha[idx], alpha[idx + 1]),
+            _interp1d(gamma, gamma_low, gamma_high, beta[idx], beta[idx + 1]),
         )
 
     def evaluate_pdf(self, events: npt.NDArray[Any], gamma: float = 2) -> npt.NDArray[np.floating]:
@@ -404,7 +439,10 @@ class KingSpatialLikelihood:
         )
 
         gamma_low, gamma_high = self.spectral_indices[idx], self.spectral_indices[idx + 1]
-        self._result_buffer[:] = 0.0
+        # No need to re-zero the buffer here: event_mask is fixed for the
+        # whole trial (only set_events changes it), and set_events already
+        # zeroed the full buffer on entry, so the masked-out region is
+        # already correct and untouched by anything else.
         self._result_buffer[self.event_mask] = _interp1d(
             gamma,
             gamma_low,
