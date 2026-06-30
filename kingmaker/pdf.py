@@ -59,14 +59,9 @@ class KingPDF:
         """
         Evaluate the King kernel given a precomputed normalization constant.
 
-        Equivalent to ``norm * unnormalized_pdf(x, alpha, beta)``, skipping
-        the alpha/beta validation, angular-cutoff masking, and norm
-        computation that :meth:`pdf` performs. Intended for callers that
-        have already validated alpha/beta (e.g. against a previously-fit
-        parameter grid) and already filtered ``x`` to be within
-        ``self.angular_cutoff``, and that can compute norm once over a
-        smaller deduplicated (alpha, beta) grid than ``len(x)`` -- e.g.
-        :meth:`kingmaker.wrapper.KingSpatialLikelihood.set_events`.
+        Computes ``norm * unnormalized_pdf(x, alpha, beta)`` directly. No
+        validation of alpha, beta, or x is performed; the caller is
+        responsible for ensuring inputs are in-range.
 
         Parameters
         ----------
@@ -506,8 +501,7 @@ class TemplateSmearedKingPDF(KingPDF):
                 np.pi / 2 - self.eval_decs[start:end],
                 self.eval_ras[start:end],
             )
-            # Use l-sorted alm order so reduceat can sum contributions per degree
-            # with a single contiguous-segment reduction instead of Python scatter.
+            # Sum contributions per degree using reduceat over l-sorted alm order.
             Y_lm_sorted = raw[self.ls_sorted, self.ms_sorted, :]  # (nalm, batch)
             contribs = np.real(self.weighted_alm_sorted[:, None] * Y_lm_sorted)  # (nalm, batch)
             self._c_l[:, start:end] = np.add.reduceat(contribs, self.l_starts, axis=0)
@@ -529,10 +523,8 @@ class TemplateSmearedKingPDF(KingPDF):
         Precompute b_l coefficients for all (alpha, beta) grid points via matmul.
 
         Evaluates the King PDF over the full (n_alpha, n_beta, n_theta) parameter
-        grid, then computes all b_l integrals in a single matrix multiply rather
-        than calling get_king_b_l once per grid point. Peak memory scales as
-        O(n_alpha * n_beta * n_theta), replacing the naive approach that would
-        require O(lmax * n_alpha * n_beta * n_theta).
+        grid, then computes all b_l integrals in a single matrix multiply.
+        Peak memory scales as O(n_alpha * n_beta * n_theta).
 
         Returns
         -------
@@ -671,7 +663,6 @@ class TemplateSmearedKingPDF(KingPDF):
         """
         Evaluate convolved PDF only at pre-set grid points (eval_decs, eval_ras).
 
-        More efficient than convolve_map() when only specific points are needed.
         Uses pre-computed spherical harmonics from set_coordinates().
 
         Parameters
@@ -739,11 +730,8 @@ class TemplateSmearedKingPDF(KingPDF):
         rng : np.random.Generator, optional
             Random number generator. If None, uses np.random.default_rng().
         n_grid : int, optional
-            Number of points in the CDF lookup grid. Higher values give more
-            accurate sampling at the cost of memory and setup time. Default
-            is 10000, which gives ~arcminute accuracy. Note that this parameter
-            is ignored for this method since the sampling is done directly from
-            the convolved map rather than via inverse CDF.
+            Unused. Sampling draws directly from pixel weights of the convolved
+            map.
 
         Returns
         -------

@@ -415,7 +415,6 @@ class KingPSFFitter:
         cdf_variance = np.cumsum(hist2) / np.sum(hist) ** 2
 
         # Get initial guess from peak location.
-        # alpha_guess = bin_centers[np.argmax(hist)]
         alpha_guess = bin_centers[np.searchsorted(cdf_hist, 0.5)]
         best_params = None
         best_chi2 = np.inf

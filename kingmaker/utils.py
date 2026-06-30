@@ -108,9 +108,8 @@ def meshgrid2d(
     a: npt.NDArray[np.floating], b: npt.NDArray[np.floating]
 ) -> Tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
     """
-    Create 2D meshgrid from 1D coordinate arrays (numba-compatible).
+    Create a 2D meshgrid from 1D coordinate arrays, compatible with numba JIT compilation.
 
-    Similar to numpy.meshgrid but optimized for use with numba JIT compilation.
     Returns transposed grids in matrix indexing ('ij') convention.
 
     Parameters

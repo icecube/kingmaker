@@ -30,8 +30,6 @@ class KingSpatialLikelihood:
     cache_parameters: bool = True
     cache_name: str = "king_parameters_cache.npz"
 
-    # Store an instance of the PDF class to use for evaluations. This will be
-    # either a KingPDF for standard point source searches
     king_pdf: KingPDF
 
     # Source-level information
@@ -85,10 +83,8 @@ class KingSpatialLikelihood:
 
         # Obtain the King distribution parameters for all bins. If we're caching parameters
         # and a cache file exists, load from the cache instead of fitting. Otherwise,
-        # run the fitter and potentially cache the results. Note that if we run the fitter,
-        # we explicitly set the angular cutoff to pi: this is to ensure that we allow the
-        # full histogram to be fit for each bin without artificially setting the PDF to 0
-        # for some bins.
+        # run the fitter and potentially cache the results. When running the fitter,
+        # angular_cutoff is set to pi so every bin's full angular error distribution is fit.
         fitted_parameters: Dict[str, npt.NDArray[np.floating]] = {}
         if cache_parameters and (cache_name is not None) and exists(cache_name):
             fitted_parameters_npz = np.load(cache_name, allow_pickle=True)
@@ -134,13 +130,9 @@ class KingSpatialLikelihood:
         # Instantiate the PDF object.
         self.king_pdf = KingPDF(angular_cutoff=angular_cutoff)
 
-        # Precompute the normalization constant for every (gamma, bin)
-        # combination on the small fitted grid once per process. set_events
-        # gathers per-event norm from this array via the same nearest-bin
-        # indices used for alpha/beta, instead of recomputing the same
-        # closed-form norm independently for every event that shares a bin
-        # (most events in a trial do, since the grid is much smaller than
-        # the event count).
+        # Precompute the normalization constant for every (gamma, bin) combination
+        # on the fitted grid once at init. set_events looks up per-event norms from
+        # this array using the same nearest-bin indices as alpha/beta.
         self.norm_values = self.king_pdf.norm(self.alpha_values, self.beta_values)
         return
 
@@ -257,13 +249,9 @@ class KingSpatialLikelihood:
             self.event_mask = all_dists < cutoff
             self.event_distances = all_dists[self.event_mask]
 
-        # Reuse the buffer across trials when the event count hasn't
-        # changed, instead of reallocating every call. Either way, the
-        # buffer is always fully zeroed here: the masked-out region is
-        # write-only-once (only evaluate_pdf writes, and only at
-        # [self.event_mask] positions), so this is the only place a stale
-        # value from a previous trial's different mask could otherwise leak
-        # through.
+        # Reuse the buffer across trials when the event count is unchanged.
+        # The buffer is always fully zeroed here so that events outside
+        # event_mask are guaranteed to be zero on every call.
         if len(self._result_buffer) != len(events):
             self._result_buffer = np.zeros(len(events))
         else:
@@ -271,14 +259,9 @@ class KingSpatialLikelihood:
 
         all_alpha, all_beta, all_norm = self._lookup_event_grid(events)
         for i, gamma in enumerate(self.spectral_indices):
-            # alpha/beta are from the fitted grid (already validated at fit
-            # time) and event_distances is already <= angular_cutoff by
-            # construction above, so bypass KingPDF.pdf()'s validation/
-            # masking and go straight to the kernel using the precomputed
-            # per-bin norm. `i` is already the correct row (spectral_indices
-            # and the leading axis of alpha_values/beta_values/norm_values
-            # are index-aligned 1:1), so there's no need to go through
-            # get_alpha_beta_gamma's searchsorted + defensive copy here.
+            # Evaluate the King PDF directly using the precomputed per-bin norm.
+            # alpha/beta come from the fitted grid (validated at fit time) and
+            # event_distances are already within angular_cutoff by construction.
             self.event_pvalue[gamma] = self.king_pdf.pdf_from_norm(
                 self.event_distances, all_alpha[i], all_beta[i], all_norm[i]
             )
@@ -292,8 +275,7 @@ class KingSpatialLikelihood:
         nearest-bin index computation is only ever done once per call.
         """
 
-        # Nearest-bin lookup. Field-first masking (events[key][mask]) avoids
-        # copying the full structured array before extracting each field.
+        # Nearest-bin lookup. Extracts each field individually after masking.
         def index(centers, values):
             i = np.searchsorted(centers, values).clip(1, len(centers) - 1)
             return np.where(values - centers[i - 1] < centers[i] - values, i - 1, i)
@@ -306,13 +288,12 @@ class KingSpatialLikelihood:
         idx = (slice(None), *event_indices)
         return self.alpha_values[idx], self.beta_values[idx], self.norm_values[idx]
 
-    def get_alpha_beta(self, events, copy=True):
+    def get_alpha_beta(self, events):
         """
         Look up fitted alpha/beta parameters for each event via nearest-bin lookup.
 
-        This is a lower-level accessor used internally by :meth:`set_events`;
-        most users will call :meth:`evaluate_pdf` instead. Useful for
-        inspecting the fitted King parameters assigned to specific events.
+        Used internally by :meth:`set_events`. Useful for inspecting the fitted
+        King parameters assigned to specific events.
 
         Parameters
         ----------
@@ -320,11 +301,6 @@ class KingSpatialLikelihood:
             Events to look up. Must contain the fields referenced by
             ``parametrization_bins``. Only events selected by the mask set in
             the most recent :meth:`set_events` call are returned.
-        copy : bool, optional
-            Currently unused; fancy-indexing into the stored alpha/beta grids
-            already returns new arrays regardless of this flag. Default is
-            True.
-
         Returns
         -------
         alpha : ndarray, shape (n_gamma, n_masked_events)
@@ -369,22 +345,17 @@ class KingSpatialLikelihood:
         """
         if alpha is None:
             assert events is not None
-            alpha, beta = self.get_alpha_beta(events, copy=False)
+            alpha, beta = self.get_alpha_beta(events)
         assert len(alpha) == len(beta)
 
         # If we have this gamma, just return it. Make sure to use copy()
-        # so the caller doesn't get a reference into our array. Note:
-        # searchsorted's default side="left" already returns the exact
-        # index of an exact match in a sorted array -- no "-1" needed here
-        # (that would be an off-by-one, wrapping to the previous row).
+        # so the caller doesn't get a reference into our array.
+        # searchsorted with side="left" returns the exact index of an exact match.
         if gamma in self.spectral_indices:
             gamma_idx = np.searchsorted(self.spectral_indices, gamma)
             return alpha[gamma_idx].copy(), beta[gamma_idx].copy()
 
-        # Otherwise, interpolate between the bracketing pair of spectral
-        # indices, clamping so the pair is always valid even when gamma is
-        # outside the stored range (extrapolation from the nearest pair).
-        # Mirrors evaluate_pdf's bracketing logic.
+        # Clamp so the bracketing pair is always within the stored range.
         idx = np.clip(
             np.searchsorted(self.spectral_indices, gamma) - 1, 0, len(self.spectral_indices) - 2
         )
@@ -426,7 +397,7 @@ class KingSpatialLikelihood:
             If ``events`` does not match the events passed to the most recent
             call to :meth:`set_events`.
         """
-        # If we haven't already calculated the per-event alpha and beta parameters, do so now.
+        # Require that set_events has been called for these events.
         if not self._events_match(events):
             raise RuntimeError(
                 "The events provided to evaluate_pdf do not match the events that were used to calculate the per-event parameters."
@@ -439,10 +410,6 @@ class KingSpatialLikelihood:
         )
 
         gamma_low, gamma_high = self.spectral_indices[idx], self.spectral_indices[idx + 1]
-        # No need to re-zero the buffer here: event_mask is fixed for the
-        # whole trial (only set_events changes it), and set_events already
-        # zeroed the full buffer on entry, so the masked-out region is
-        # already correct and untouched by anything else.
         self._result_buffer[self.event_mask] = _interp1d(
             gamma,
             gamma_low,

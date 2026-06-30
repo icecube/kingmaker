@@ -17,13 +17,8 @@ def _unnormalized_pdf(
     beta: Union[float, npt.NDArray[np.floating]],
 ) -> Union[float, npt.NDArray[np.floating]]:
     """
-    Evaluate the unnormalized spherical King function (without solid angle Jacobian).
-
-    Uses the exact spherical distance (1 - cos θ) in place of the flat-sky θ²/2,
-    so this form is accurate for all angular scales:
+    Evaluate the unnormalized spherical King function (without solid angle Jacobian):
         f(x) = [1 + (1 - cos x) / (alpha² * beta)]^(-beta)
-
-    For small x, (1 - cos x) ≈ x²/2, recovering the flat-sky King function.
 
     Parameters
     ----------
@@ -55,7 +50,7 @@ def _unnormalized_cdf(
 
     Uses the exact spherical form via the substitution t = 1 - cos θ,
     dt = sin θ dθ, which reduces the solid-angle integral to a power law
-    with a closed-form antiderivative. No flat-sky approximation.
+    with a closed-form antiderivative.
 
     Parameters
     ----------

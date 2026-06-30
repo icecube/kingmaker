@@ -122,7 +122,7 @@ class TestGetAlphaBetaGammaExact:
         rng = np.random.default_rng(2)
         events = _make_events(10, rng)
         likelihood.set_events(events, source_ras=np.array([0.0]), source_decs=np.array([0.0]))
-        all_alpha, all_beta = likelihood.get_alpha_beta(events, copy=False)
+        all_alpha, all_beta = likelihood.get_alpha_beta(events)
 
         for gamma_idx, gamma in enumerate(SPECTRAL_INDICES):
             alpha, beta = likelihood.get_alpha_beta_gamma(gamma, alpha=all_alpha, beta=all_beta)
@@ -143,7 +143,7 @@ class TestGetAlphaBetaGammaInterpolation:
         rng = np.random.default_rng(3)
         events = _make_events(10, rng)
         likelihood.set_events(events, source_ras=np.array([0.0]), source_decs=np.array([0.0]))
-        all_alpha, all_beta = likelihood.get_alpha_beta(events, copy=False)
+        all_alpha, all_beta = likelihood.get_alpha_beta(events)
 
         gamma = 1.5  # between index 0 (gamma=1.0) and index 1 (gamma=2.0)
         alpha, beta = likelihood.get_alpha_beta_gamma(gamma, alpha=all_alpha, beta=all_beta)
