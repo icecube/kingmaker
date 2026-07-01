@@ -1,13 +1,14 @@
-from typing import Optional, Tuple, Union, cast
+from typing import Any, Dict, Optional, Tuple, Union, cast
 import numpy as np
 import numpy.typing as npt
 import healpy as hp
 from scipy.interpolate import interpn
+from scipy.sparse import csr_array
 from scipy.special import legendre_p_all, sph_harm_y_all
 
 from .distribution import _log10pi
 from .distribution import _norm, _unnormalized_pdf, _unnormalized_cdf
-from .utils import angular_distance, meshgrid2d
+from .utils import _build_marginalized_grid
 
 
 class KingPDF:
@@ -16,16 +17,59 @@ class KingPDF:
     function (CDF) for the King spatial distribution.
 
     This class manages PDF and CDF evaluations with support for angular cutoffs
-    and proper normalization over the sphere.
+    and proper normalization over the sphere. When ``enable_signal_subtraction``
+    is True, a pre-cached grid of RA-marginalized PDF values is built at
+    construction and used by :meth:`marginalize` for fast lookup.
 
     Parameters
     ----------
     angular_cutoff : float, optional
         Maximum angular separation in radians. Default is pi (full sphere).
+    enable_signal_subtraction : bool, optional
+        If True, build the signal-subtraction marginalization cache at
+        construction. Requires ``signal_subtraction_parameters``. Default
+        is False.
+    signal_subtraction_parameters : dict, optional
+        Configuration for the marginalization cache. Required when
+        ``enable_signal_subtraction=True``. Recognized keys:
+
+        ``source_declination`` : list or ndarray
+            True source declination(s) in radians. **Required.**
+        ``points_alpha`` : ndarray, optional
+            Alpha grid points in radians. Default: 30 log-spaced values
+            from 0.05 degrees to pi.
+        ``points_beta`` : ndarray, optional
+            Beta grid points. Default: 20 log-spaced values from just
+            above 1 to 10.
+        ``n_signed_delta_dec`` : int, optional
+            Number of points in the signed declination-offset axis.
+            Default: 200.
+        ``n_ra_bins`` : int, optional
+            Number of RA integration intervals over [0, pi]. Default: 100.
     """
 
-    def __init__(self, *, angular_cutoff: float = np.pi) -> None:
+    def __init__(
+        self,
+        *,
+        angular_cutoff: float = np.pi,
+        enable_signal_subtraction: bool = False,
+        signal_subtraction_parameters: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self.angular_cutoff = angular_cutoff
+        self.enable_signal_subtraction = enable_signal_subtraction
+
+        if enable_signal_subtraction:
+            if signal_subtraction_parameters is None:
+                raise ValueError(
+                    "signal_subtraction_parameters must be provided when"
+                    " enable_signal_subtraction=True."
+                )
+            if "source_declination" not in signal_subtraction_parameters:
+                raise ValueError(
+                    "signal_subtraction_parameters must contain a 'source_declination' key."
+                )
+            self.signal_subtraction_parameters = signal_subtraction_parameters
+            self._build_signal_subtraction_cache()
 
     def norm(
         self,
@@ -196,85 +240,185 @@ class KingPDF:
 
         return normalized_cdf
 
+    def _build_signal_subtraction_cache(self) -> None:
+        """
+        Build the precomputed RA-marginalized PDF grid for signal subtraction.
+
+        Reads ``self.signal_subtraction_parameters`` and fills a 4D grid over
+        (dec_true, log10(alpha), beta, signed_delta_dec), where
+        signed_delta_dec = dec_reco - dec_true. The grid and its coordinate
+        axes are stored on the instance for use by :meth:`marginalize`.
+        """
+        params = self.signal_subtraction_parameters
+        source_decs = np.sort(
+            np.atleast_1d(np.asarray(params["source_declination"], dtype=np.float64))
+        )
+
+        points_alpha = np.sort(
+            np.asarray(
+                params.get(
+                    "points_alpha",
+                    np.logspace(np.log10(np.radians(0.05)), _log10pi, 30),
+                ),
+                dtype=np.float64,
+            )
+        )
+        points_beta = np.sort(
+            np.asarray(
+                # Lower bound is kept away from 1.0 to avoid float64 precision
+                # loss in _norm() at beta -> 1, which otherwise produces inf.
+                params.get("points_beta", np.logspace(0.01, 1, 20)),
+                dtype=np.float64,
+            )
+        )
+        n_signed_delta_dec = int(params.get("n_signed_delta_dec", 200))
+        n_ra_bins = int(params.get("n_ra_bins", 100))
+
+        if np.any(points_alpha <= 0):
+            raise ValueError(
+                "signal_subtraction_parameters['points_alpha'] contains values <= 0."
+                " The King PDF isn't defined in this region."
+            )
+        if np.any(points_beta <= 1):
+            raise ValueError(
+                "signal_subtraction_parameters['points_beta'] contains values <= 1."
+                " The King PDF isn't defined in this region."
+            )
+
+        self._ss_source_decs = source_decs
+        self._ss_points_alpha = points_alpha
+        self._ss_log10_points_alpha = np.log10(points_alpha)
+        self._ss_points_beta = points_beta
+
+        # signed_delta_dec spans [-angular_cutoff, +angular_cutoff]; the PDF
+        # is zero outside this range regardless of dec_true.
+        self._ss_signed_delta_dec = np.linspace(
+            -self.angular_cutoff, self.angular_cutoff, n_signed_delta_dec
+        )
+
+        # RA integration nodes on [0, pi] (see _marginalize_ra for the
+        # symmetry argument that limits integration to this half).
+        ra_grid = np.linspace(0.0, np.pi, n_ra_bins + 1)
+
+        # Normalization depends only on (alpha, beta), not on dec_true, so
+        # it's computed once here instead of inside the per-(dec, alpha,
+        # beta) numba loop.
+        alpha_mg, beta_mg = np.meshgrid(points_alpha, points_beta, indexing="ij")
+        norm_grid = cast(npt.NDArray[np.floating], self.norm(alpha_mg, beta_mg))
+
+        self._ss_grid = _build_marginalized_grid(
+            source_decs,
+            points_alpha,
+            points_beta,
+            norm_grid.astype(np.float64),
+            float(self.angular_cutoff),
+            self._ss_signed_delta_dec,
+            ra_grid,
+        )
+        # self._ss_grid has shape (n_dec_true, n_alpha, n_beta, n_signed_delta_dec)
+
     def marginalize(
         self,
-        dec: float,
-        alpha: float,
-        beta: float,
-        threshold: float = 1e-6,
-        nbins: Optional[int] = None,
-    ) -> Tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+        source_decs: npt.NDArray[np.floating],
+        dec_reco: npt.NDArray[np.floating],
+        alpha: npt.NDArray[np.floating],
+        beta: npt.NDArray[np.floating],
+    ) -> csr_array:
         """
-        Marginalize the King PDF over right ascension to obtain declination profile.
+        Evaluate the RA-marginalized King PDF for every (event, source) pair.
 
-        Integrates the 2D King PDF over RA using adaptive binning to produce a
-        1D profile in sin(declination). Only bins with PDF above threshold are computed.
+        Looks up values from the grid built in :meth:`_build_signal_subtraction_cache`
+        via trilinear interpolation over (log10(alpha), beta, signed_delta_dec) at
+        each source's declination, where signed_delta_dec = dec_reco - source_dec.
+        Pairs whose signed_delta_dec falls outside the grid range (i.e. beyond
+        ``angular_cutoff``) are not computed and are left as zero in the sparse
+        result.
 
         Parameters
         ----------
-        dec : float
-            Source declination in radians.
-        alpha : float
-            King distribution alpha parameter (scale) in radians.
-        beta : float
-            King distribution beta parameter (tail weight).
-        threshold : float, optional
-            Minimum relative PDF value for bin inclusion. Default is 1e-6.
-        nbins : int, optional
-            Number of bins in sin(declination). If None, uses adaptive binning.
+        source_decs : ndarray, shape (n_sources,)
+            True source declination(s) in radians.
+        dec_reco : ndarray, shape (n_events,)
+            Reconstructed event declination(s) in radians.
+        alpha : ndarray, shape (n_events,)
+            Per-event King alpha parameter in radians.
+        beta : ndarray, shape (n_events,)
+            Per-event King beta parameter.
 
         Returns
         -------
-        sindec_bins : ndarray
-            Bin edges in sin(declination).
-        marginalized : ndarray
-            Marginalized PDF values at each bin.
+        csr_array, shape (n_events, n_sources)
+            Sparse array of marginalized PDF values, indexed
+            ``[event_index, source_index]``.
+
+        Raises
+        ------
+        RuntimeError
+            If called on an instance constructed with
+            ``enable_signal_subtraction=False``.
         """
-        if np.any(alpha <= 0):
-            raise ValueError("Received alpha <= 0. The PDF is not defined here.")
-        if np.any(beta <= 1):
-            raise ValueError("Received beta <= 1. The PDF is not defined here.")
-
-        # Generate the sindec binning
-        sindec = np.sin(dec)
-        if nbins is None:
-            delta = min(0.025, (np.sin(dec + alpha) - np.sin(dec - alpha)) / 2)
-            sindec_bins = np.concatenate(
-                [np.arange(-1, sindec, delta), np.arange(sindec, 1, delta)]
+        if not self.enable_signal_subtraction:
+            raise RuntimeError(
+                "marginalize() requires the instance to be constructed with"
+                " enable_signal_subtraction=True and signal_subtraction_parameters set."
             )
-        else:
-            sindec_bins = np.concatenate([[sindec, 1], np.linspace(-1, 1, nbins)])
-            sindec_bins = np.unique(sindec_bins)
 
-        # Mask unnecessary declination bins
-        pdf_check = cast(
-            npt.NDArray[np.floating], self.pdf(np.abs(dec - np.arcsin(sindec_bins)), alpha, beta)
+        source_decs = np.atleast_1d(np.asarray(source_decs, dtype=np.float64))
+        dec_reco = np.asarray(dec_reco, dtype=np.float64)
+        alpha = np.asarray(alpha, dtype=np.float64)
+        beta = np.asarray(beta, dtype=np.float64)
+
+        n_events = len(dec_reco)
+        n_sources = len(source_decs)
+
+        # For each source, only events within angular_cutoff of it can have a
+        # nonzero marginalized PDF; most (event, source) pairs are skipped.
+        row_chunks, col_chunks, query_chunks = [], [], []
+        for source_index, source_dec in enumerate(source_decs):
+            signed_delta_dec = dec_reco - source_dec
+            event_indices = np.flatnonzero(np.abs(signed_delta_dec) <= self.angular_cutoff)
+            if len(event_indices) == 0:
+                continue
+            row_chunks.append(event_indices)
+            col_chunks.append(np.full(len(event_indices), source_index, dtype=np.intp))
+            query_chunks.append(
+                np.column_stack(
+                    [
+                        np.full(len(event_indices), source_dec),
+                        np.log10(alpha[event_indices]),
+                        beta[event_indices],
+                        signed_delta_dec[event_indices],
+                    ]
+                )
+            )
+
+        if not query_chunks:
+            return csr_array((n_events, n_sources), dtype=np.float64)
+
+        rows = np.concatenate(row_chunks)
+        cols = np.concatenate(col_chunks)
+        queries = np.vstack(query_chunks)
+
+        values = interpn(
+            (
+                self._ss_source_decs,
+                self._ss_log10_points_alpha,
+                self._ss_points_beta,
+                self._ss_signed_delta_dec,
+            ),
+            self._ss_grid,
+            queries,
+            method="linear",
+            bounds_error=False,
+            fill_value=0.0,
         )
-        decmask = pdf_check / pdf_check.max() > threshold
 
-        # Generate a binning in RA from 0 to 2pi.
-        nbins = int(2 * np.pi / alpha * 5)
-        ra_bins = np.linspace(0, 2 * np.pi, nbins)
-
-        # Mask unnecessary RA bins
-        pdf_check = cast(npt.NDArray[np.floating], self.pdf(ra_bins, alpha, beta))
-        ramask = pdf_check / pdf_check.max() > threshold
-        ra_bins = ra_bins[ramask]
-
-        # Calculate the PDF at each grid point
-        ra_points, dec_points = meshgrid2d(ra_bins, np.arcsin(sindec_bins[decmask]))
-        distance = angular_distance(0, dec, ra_points, dec_points)
-        pdf_vals = cast(npt.NDArray[np.floating], self.pdf(distance, alpha, beta))
-
-        # Integrate over RA using a simple trapezoid rule integration.
-        # This should probably be checked for correct units. For example,
-        # should this include a np.diff(sindec_bins) in the denominator?
-        # I don't think it should, but someone should help check this.
-        marginalized = np.zeros_like(sindec_bins)
-        marginalized[decmask] = (
-            (pdf_vals[:, :-1] + pdf_vals[:, 1:]) / 2 * np.diff(ra_bins)[None, :]
-        ).sum(axis=1)
-        return sindec_bins, marginalized
+        nonzero = values > 0.0
+        return csr_array(
+            (values[nonzero], (rows[nonzero], cols[nonzero])),
+            shape=(n_events, n_sources),
+            dtype=np.float64,
+        )
 
     def sample(
         self,
@@ -694,12 +838,11 @@ class TemplateSmearedKingPDF(KingPDF):
 
     def marginalize(
         self,
-        dec: float,
-        alpha: float,
-        beta: float,
-        threshold: float = 1e-6,
-        nbins: Optional[int] = None,
-    ) -> Tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+        source_decs: npt.NDArray[np.floating],
+        dec_reco: npt.NDArray[np.floating],
+        alpha: npt.NDArray[np.floating],
+        beta: npt.NDArray[np.floating],
+    ) -> csr_array:
         raise NotImplementedError("Signal subtraction for templates is not implemented.")
 
     def sample(

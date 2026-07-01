@@ -31,14 +31,30 @@ likelihoods.
 
 **Marginalizing over right ascension**
 
+Signal-subtraction likelihood terms need the King PDF marginalized over
+right ascension: the probability of an event reconstructing at a given
+declination, for a source at a given true declination. See
+:doc:`signal_subtraction` for the full picture; the short version:
+
 .. code-block:: python
 
-   source_dec = np.radians(30)
-   sindec_bins, pdf_marginalized = king.marginalize(
-       source_dec, alpha, beta, threshold=1e-6, nbins=100,
+   king_ss = KingPDF(
+       angular_cutoff=np.radians(10.0),
+       enable_signal_subtraction=True,
+       signal_subtraction_parameters={
+           "source_declination": np.radians([10.0, 30.0, 50.0]),
+       },
    )
-   # pdf_marginalized is the expected signal contribution as a function of
-   # sin(declination), for use in a signal-subtraction likelihood term.
+
+   dec_reco = np.radians([29.0, 31.5, 9.0])
+   alpha_evt = np.radians([0.8, 1.2, 0.5])
+   beta_evt = np.array([2.0, 2.5, 3.0])
+
+   # Sparse (n_events, n_sources) array of marginalized PDF values.
+   pdf_marginalized = king_ss.marginalize(
+       king_ss.signal_subtraction_parameters["source_declination"],
+       dec_reco, alpha_evt, beta_evt,
+   )
 
 *Common options:*
 
@@ -48,10 +64,10 @@ likelihoods.
 - ``n_grid`` (``sample``): size of the CDF lookup grid used for inverse
   transform sampling. Higher values trade memory/setup time for accuracy;
   the default of 10000 gives roughly arcminute accuracy.
-- ``threshold`` / ``nbins`` (``marginalize``): ``threshold`` discards
-  declination/RA bins whose relative PDF value is negligible (controls
-  sparsity); ``nbins=None`` (default) uses adaptive binning sized to
-  ``alpha`` instead of a fixed grid.
+- ``enable_signal_subtraction`` / ``signal_subtraction_parameters``
+  (constructor): build the RA-marginalized PDF cache used by
+  ``marginalize``. See :doc:`signal_subtraction` for the grid layout and
+  available keys.
 
 `basic_demo.ipynb <https://github.com/mjlarson/kingmaker/blob/main/examples/basic_demo.ipynb>`_
     Parameter effects, normalization checks, and sampling/evaluation speed

@@ -32,3 +32,4 @@ spherical-harmonic convolution with HEALPix template maps.
    :caption: Examples
 
    examples
+   signal_subtraction
