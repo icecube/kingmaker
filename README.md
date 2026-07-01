@@ -134,16 +134,53 @@ beta_value = beta_interp(test_point)
 
 ### Signal-Subtracted Likelihood
 
-Compute the marginalized PDF for signal subtraction in likelihood analyses:
+`MarginalizedKingPDF` pre-computes the King PDF integrated over right ascension
+on a grid and exposes two methods for different use cases:
+
+- **`pdf(x, alpha, beta, source_dec)`** — evaluates the marginalized PDF for a
+  *single* source at a given set of event declinations. Returns a dense NumPy
+  array. Intended for plotting, diagnostics, and demonstrations.
+
+- **`evaluate(source_decs, event_decs, alpha, beta)`** — evaluates the
+  marginalized PDF for *all* (event, source) pairs at once and returns a
+  `scipy.sparse.csr_array` of shape `(n_events, n_sources)`. The sparse format
+  is efficient because events far from a source (beyond `angular_cutoff`)
+  contribute zero and are omitted. This is the method to use in analyses.
 
 ```python
-# Marginalize over right ascension at a source declination
-source_dec = np.radians(30)  # 30 degrees declination
+import numpy as np
+from kingmaker.pdf import MarginalizedKingPDF
 
-sindec_bins, pdf_marginalized = king.marginalize(source_dec, alpha, beta)
+# Define source and event parameters.
+source_decs = np.radians(np.linspace(-60, 60, 13))  # 13 sources
+alpha = np.radians(1.0)
+beta = 2.0
 
-# Use in likelihood calculation
-# This represents the expected signal contribution in sin(dec) space
+mkpdf = MarginalizedKingPDF(
+    source_declination=source_decs,
+    angular_cutoff=np.radians(10.0),
+)
+
+# Single-source dense evaluation — useful for plots and quick checks.
+dec_reco = np.radians(np.linspace(-10, 10, 200))
+alpha_arr = np.full(200, alpha)
+beta_arr = np.full(200, beta)
+profile = mkpdf.pdf(dec_reco, alpha_arr, beta_arr, source_dec=np.radians(0.0))
+
+# Batch sparse evaluation over all events × sources — use this in analyses.
+n_events = 10_000
+rng = np.random.default_rng(42)
+ev_decs = np.arcsin(rng.uniform(-1, 1, n_events))
+alpha_evt = np.full(n_events, alpha)
+beta_evt = np.full(n_events, beta)
+
+pdf_matrix = mkpdf.evaluate(source_decs, ev_decs, alpha_evt, beta_evt)
+# pdf_matrix has shape (n_events, n_sources); most entries are zero.
+print(f"Nonzero fraction: {pdf_matrix.nnz / pdf_matrix.shape[0] / pdf_matrix.shape[1]:.3%}")
+
+# On repeat calls with the same geometry, pass the previous result as a mask
+# to skip the angular-distance masking loop entirely.
+pdf_matrix_2 = mkpdf.evaluate(source_decs, ev_decs, alpha_evt, beta_evt, mask=pdf_matrix)
 ```
 
 ### Template Smearing

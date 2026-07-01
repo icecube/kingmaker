@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
-from kingmaker.pdf import KingPDF
+from kingmaker.pdf import KingPDF, MarginalizedKingPDF
 
 
 # ---------------------------------------------------------------------------
@@ -256,107 +256,213 @@ class TestKingPDFSample:
 
 
 # ---------------------------------------------------------------------------
-# Marginalize
+# KingPDF.evaluate
 # ---------------------------------------------------------------------------
 
 
-class TestKingPDFInitSignalSubtraction:
-    def test_disabled_by_default(self):
-        king = KingPDF()
-        assert king.enable_signal_subtraction is False
-
-    def test_requires_parameters_dict(self):
-        with pytest.raises(ValueError):
-            KingPDF(enable_signal_subtraction=True)
-
-    def test_requires_source_declination_key(self):
-        with pytest.raises(ValueError):
-            KingPDF(
-                enable_signal_subtraction=True,
-                signal_subtraction_parameters={"n_signed_delta_dec": 50},
-            )
-
-    def test_builds_cache_with_defaults(self):
-        king = KingPDF(
-            angular_cutoff=np.radians(10.0),
-            enable_signal_subtraction=True,
-            signal_subtraction_parameters={"source_declination": np.radians([-30.0, 0.0, 30.0])},
-        )
-        assert king._ss_grid.shape[0] == 3
-        assert np.all(np.isfinite(king._ss_grid))
-
-    def test_custom_grid_sizes_respected(self):
-        king = KingPDF(
-            angular_cutoff=np.radians(10.0),
-            enable_signal_subtraction=True,
-            signal_subtraction_parameters={
-                "source_declination": np.radians([0.0]),
-                "n_signed_delta_dec": 40,
-                "n_ra_bins": 20,
-            },
-        )
-        assert king._ss_grid.shape == (1, 30, 20, 40)
-
-
-class TestKingPDFMarginalize:
+class TestKingPDFEvaluate:
     @pytest.fixture
     def king(self):
-        return KingPDF(
-            angular_cutoff=np.radians(10.0),
-            enable_signal_subtraction=True,
-            signal_subtraction_parameters={
-                "source_declination": np.radians(np.linspace(-80, 80, 21))
-            },
-        )
-
-    def test_requires_signal_subtraction_enabled(self):
-        king = KingPDF()
-        with pytest.raises(RuntimeError):
-            king.marginalize(
-                np.radians([0.0]), np.radians([0.0]), np.array([np.radians(1.0)]), np.array([2.0])
-            )
+        return KingPDF(angular_cutoff=np.radians(10.0))
 
     def test_output_shape(self, king):
-        source_decs = np.radians([-10.0, 0.0, 10.0])
-        dec_reco = np.radians(np.linspace(-15, 15, 5))
+        src_ras = np.radians([0.0, 90.0])
+        src_decs = np.radians([0.0, 30.0])
+        ev_ras = np.radians(np.linspace(0, 10, 5))
+        ev_decs = np.radians(np.linspace(-5, 5, 5))
         alpha = np.full(5, np.radians(1.0))
         beta = np.full(5, 2.0)
-        result = king.marginalize(source_decs, dec_reco, alpha, beta)
-        assert result.shape == (5, 3)
-
-    def test_nonnegative(self, king):
-        source_decs = np.radians([-10.0, 0.0, 10.0])
-        dec_reco = np.radians(np.linspace(-15, 15, 5))
-        alpha = np.full(5, np.radians(1.0))
-        beta = np.full(5, 2.0)
-        result = king.marginalize(source_decs, dec_reco, alpha, beta)
-        assert np.all(result.toarray() >= 0)
-
-    def test_zero_beyond_cutoff(self, king):
-        """Events far outside angular_cutoff from every source are dropped (zero)."""
-        source_decs = np.radians([0.0])
-        dec_reco = np.radians([0.0, 50.0])
-        alpha = np.full(2, np.radians(1.0))
-        beta = np.full(2, 2.0)
-        result = king.marginalize(source_decs, dec_reco, alpha, beta).toarray()
-        assert result[0, 0] > 0
-        assert result[1, 0] == 0
-
-    def test_peaks_near_source_declination(self, king):
-        """The marginalized PDF should be largest when dec_reco == source_dec."""
-        source_dec = np.radians(20.0)
-        dec_reco = np.radians(np.linspace(15.0, 25.0, 21))
-        alpha = np.full(len(dec_reco), np.radians(1.0))
-        beta = np.full(len(dec_reco), 2.0)
-        result = king.marginalize(np.array([source_dec]), dec_reco, alpha, beta).toarray()[:, 0]
-        assert np.argmax(result) == np.argmin(np.abs(dec_reco - source_dec))
+        result = king.evaluate(src_ras, src_decs, ev_ras, ev_decs, alpha, beta)
+        assert result.shape == (5, 2)
 
     def test_returns_sparse_array(self, king):
         from scipy.sparse import csr_array
 
-        source_decs = np.radians([0.0])
-        dec_reco = np.radians([0.0])
-        alpha = np.array([np.radians(1.0)])
-        beta = np.array([2.0])
-        result = king.marginalize(source_decs, dec_reco, alpha, beta)
+        result = king.evaluate(
+            np.array([0.0]),
+            np.array([0.0]),
+            np.array([0.0]),
+            np.array([0.0]),
+            np.array([np.radians(1.0)]),
+            np.array([2.0]),
+        )
         assert isinstance(result, csr_array)
+
+    def test_nonnegative(self, king):
+        rng = np.random.default_rng(0)
+        src_ras = np.radians([0.0])
+        src_decs = np.radians([0.0])
+        ev_ras = rng.uniform(0, 2 * np.pi, 50)
+        ev_decs = np.arcsin(rng.uniform(-1, 1, 50))
+        alpha = np.full(50, np.radians(1.0))
+        beta = np.full(50, 2.0)
+        result = king.evaluate(src_ras, src_decs, ev_ras, ev_decs, alpha, beta)
+        assert np.all(result.toarray() >= 0)
+
+    def test_zero_beyond_cutoff(self, king):
+        src_ras = np.array([0.0])
+        src_decs = np.array([0.0])
+        ev_ras = np.array([0.0, 0.0])
+        ev_decs = np.radians([0.0, 50.0])
+        alpha = np.full(2, np.radians(1.0))
+        beta = np.full(2, 2.0)
+        result = king.evaluate(src_ras, src_decs, ev_ras, ev_decs, alpha, beta).toarray()
+        assert result[0, 0] > 0
+        assert result[1, 0] == 0
+
+    def test_mask_gives_same_result(self, king):
+        rng = np.random.default_rng(1)
+        src_ras = np.radians([0.0, 45.0])
+        src_decs = np.radians([0.0, 10.0])
+        ev_ras = rng.uniform(0, 2 * np.pi, 30)
+        ev_decs = np.arcsin(rng.uniform(-1, 1, 30))
+        alpha = np.full(30, np.radians(1.0))
+        beta = np.full(30, 2.0)
+        first = king.evaluate(src_ras, src_decs, ev_ras, ev_decs, alpha, beta)
+        second = king.evaluate(src_ras, src_decs, ev_ras, ev_decs, alpha, beta, mask=first)
+        assert_allclose(first.toarray(), second.toarray(), rtol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# MarginalizedKingPDF
+# ---------------------------------------------------------------------------
+
+
+class TestMarginalizedKingPDFInit:
+    def test_builds_cache_with_defaults(self):
+        mkpdf = MarginalizedKingPDF(
+            source_declination=np.radians([-30.0, 0.0, 30.0]),
+            angular_cutoff=np.radians(10.0),
+        )
+        assert mkpdf._grid.shape[0] == 3
+        assert np.all(np.isfinite(mkpdf._grid))
+
+    def test_king_instance_stored(self):
+        mkpdf = MarginalizedKingPDF(
+            source_declination=np.radians([0.0]),
+            angular_cutoff=np.radians(10.0),
+        )
+        assert isinstance(mkpdf.king, KingPDF)
+        assert mkpdf.king.angular_cutoff == mkpdf.angular_cutoff
+
+    def test_source_declination_stored_sorted(self):
+        mkpdf = MarginalizedKingPDF(
+            source_declination=np.radians([30.0, -30.0, 0.0]),
+            angular_cutoff=np.radians(10.0),
+        )
+        assert np.all(np.diff(mkpdf.source_declination) >= 0)
+
+    def test_custom_grid_sizes_respected(self):
+        mkpdf = MarginalizedKingPDF(
+            source_declination=np.radians([0.0]),
+            angular_cutoff=np.radians(10.0),
+            n_signed_delta_dec=40,
+            n_ra_bins=20,
+        )
+        assert mkpdf._grid.shape == (1, 30, 20, 40)
+
+    def test_invalid_points_alpha_raises(self):
+        with pytest.raises(ValueError):
+            MarginalizedKingPDF(
+                source_declination=np.radians([0.0]),
+                points_alpha=np.array([-0.1, 0.5, 1.0]),
+            )
+
+    def test_invalid_points_beta_raises(self):
+        with pytest.raises(ValueError):
+            MarginalizedKingPDF(
+                source_declination=np.radians([0.0]),
+                points_beta=np.array([0.5, 1.0, 2.0]),
+            )
+
+
+class TestMarginalizedKingPDFPdf:
+    @pytest.fixture
+    def mkpdf(self):
+        return MarginalizedKingPDF(
+            source_declination=np.radians(np.linspace(-80, 80, 21)),
+            angular_cutoff=np.radians(10.0),
+        )
+
+    def test_returns_dense_array(self, mkpdf):
+        result = mkpdf.pdf(np.radians([0.0, 1.0]), np.radians(1.0), 2.0, np.radians(0.0))
+        assert isinstance(result, np.ndarray)
+
+    def test_nonnegative(self, mkpdf):
+        x = np.radians(np.linspace(-5.0, 5.0, 20))
+        alpha = np.full(20, np.radians(1.0))
+        beta = np.full(20, 2.0)
+        result = mkpdf.pdf(x, alpha, beta, np.radians(0.0))
+        assert np.all(result >= 0)
+
+    def test_zero_beyond_cutoff(self, mkpdf):
+        result = mkpdf.pdf(np.radians([0.0, 50.0]), np.radians(1.0), 2.0, np.radians(0.0))
+        assert result[0] > 0
+        assert result[1] == 0
+
+    def test_peaks_near_source_declination(self, mkpdf):
+        source_dec = np.radians(20.0)
+        x = np.radians(np.linspace(15.0, 25.0, 21))
+        alpha = np.full(len(x), np.radians(1.0))
+        beta = np.full(len(x), 2.0)
+        result = mkpdf.pdf(x, alpha, beta, source_dec)
+        assert np.argmax(result) == np.argmin(np.abs(x - source_dec))
+
+    def test_scalar_alpha_beta_broadcast(self, mkpdf):
+        x = np.radians(np.linspace(-3.0, 3.0, 10))
+        result = mkpdf.pdf(x, np.radians(1.0), 2.0, np.radians(0.0))
+        assert result.shape == (10,)
+
+
+class TestMarginalizedKingPDFEvaluate:
+    @pytest.fixture
+    def mkpdf(self):
+        return MarginalizedKingPDF(
+            source_declination=np.radians(np.linspace(-80, 80, 21)),
+            angular_cutoff=np.radians(10.0),
+        )
+
+    def test_output_shape(self, mkpdf):
+        source_decs = np.radians([-10.0, 0.0, 10.0])
+        event_decs = np.radians(np.linspace(-15, 15, 5))
+        alpha = np.full(5, np.radians(1.0))
+        beta = np.full(5, 2.0)
+        result = mkpdf.evaluate(source_decs, event_decs, alpha, beta)
+        assert result.shape == (5, 3)
+
+    def test_nonnegative(self, mkpdf):
+        source_decs = np.radians([-10.0, 0.0, 10.0])
+        event_decs = np.radians(np.linspace(-15, 15, 5))
+        alpha = np.full(5, np.radians(1.0))
+        beta = np.full(5, 2.0)
+        result = mkpdf.evaluate(source_decs, event_decs, alpha, beta)
+        assert np.all(result.toarray() >= 0)
+
+    def test_zero_beyond_cutoff(self, mkpdf):
+        source_decs = np.radians([0.0])
+        event_decs = np.radians([0.0, 50.0])
+        alpha = np.full(2, np.radians(1.0))
+        beta = np.full(2, 2.0)
+        result = mkpdf.evaluate(source_decs, event_decs, alpha, beta).toarray()
+        assert result[0, 0] > 0
+        assert result[1, 0] == 0
+
+    def test_returns_sparse_array(self, mkpdf):
+        from scipy.sparse import csr_array
+
+        result = mkpdf.evaluate(
+            np.radians([0.0]),
+            np.radians([0.0]),
+            np.array([np.radians(1.0)]),
+            np.array([2.0]),
+        )
+        assert isinstance(result, csr_array)
+
+    def test_mask_gives_same_result(self, mkpdf):
+        source_decs = np.radians([-10.0, 0.0, 10.0])
+        event_decs = np.radians(np.linspace(-15, 15, 30))
+        alpha = np.full(30, np.radians(1.0))
+        beta = np.full(30, 2.0)
+        first = mkpdf.evaluate(source_decs, event_decs, alpha, beta)
+        second = mkpdf.evaluate(source_decs, event_decs, alpha, beta, mask=first)
+        assert_allclose(first.toarray(), second.toarray(), rtol=1e-12)

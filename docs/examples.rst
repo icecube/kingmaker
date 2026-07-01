@@ -33,28 +33,36 @@ likelihoods.
 
 Signal-subtraction likelihood terms need the King PDF marginalized over
 right ascension: the probability of an event reconstructing at a given
-declination, for a source at a given true declination. See
-:doc:`signal_subtraction` for the full picture; the short version:
+declination, for a source at a given true declination.
+:class:`~kingmaker.pdf.MarginalizedKingPDF` exposes two methods for this:
+
+- :meth:`~kingmaker.pdf.MarginalizedKingPDF.pdf` ``(x, alpha, beta, source_dec)``
+  evaluates the marginalized profile for a **single source** and returns a
+  **dense array**. Intended for plotting and single-source checks.
+- :meth:`~kingmaker.pdf.MarginalizedKingPDF.evaluate` ``(source_decs, event_decs, alpha, beta)``
+  evaluates all (event, source) pairs at once and returns a
+  **sparse** ``(n_events, n_sources)`` matrix. This is the method to use in
+  analyses; see :doc:`signal_subtraction` for the full picture.
 
 .. code-block:: python
 
-   king_ss = KingPDF(
+   from kingmaker.pdf import MarginalizedKingPDF
+
+   source_decs = np.radians([10.0, 30.0, 50.0])
+   mkpdf = MarginalizedKingPDF(
+       source_declination=source_decs,
        angular_cutoff=np.radians(10.0),
-       enable_signal_subtraction=True,
-       signal_subtraction_parameters={
-           "source_declination": np.radians([10.0, 30.0, 50.0]),
-       },
    )
 
    dec_reco = np.radians([29.0, 31.5, 9.0])
    alpha_evt = np.radians([0.8, 1.2, 0.5])
    beta_evt = np.array([2.0, 2.5, 3.0])
 
-   # Sparse (n_events, n_sources) array of marginalized PDF values.
-   pdf_marginalized = king_ss.marginalize(
-       king_ss.signal_subtraction_parameters["source_declination"],
-       dec_reco, alpha_evt, beta_evt,
-   )
+   # Sparse (n_events, n_sources) array — use this in analyses.
+   pdf_matrix = mkpdf.evaluate(source_decs, dec_reco, alpha_evt, beta_evt)
+
+   # Dense single-source array — use this for plots and sanity checks.
+   profile = mkpdf.pdf(dec_reco, alpha_evt, beta_evt, source_dec=np.radians(30.0))
 
 *Common options:*
 
@@ -64,10 +72,10 @@ declination, for a source at a given true declination. See
 - ``n_grid`` (``sample``): size of the CDF lookup grid used for inverse
   transform sampling. Higher values trade memory/setup time for accuracy;
   the default of 10000 gives roughly arcminute accuracy.
-- ``enable_signal_subtraction`` / ``signal_subtraction_parameters``
-  (constructor): build the RA-marginalized PDF cache used by
-  ``marginalize``. See :doc:`signal_subtraction` for the grid layout and
-  available keys.
+- ``source_declination`` / ``points_alpha`` / ``points_beta`` /
+  ``n_signed_delta_dec`` / ``n_ra_bins`` (:class:`~kingmaker.pdf.MarginalizedKingPDF`
+  constructor): control the source positions and interpolation grid for the
+  RA-marginalized PDF. See :doc:`signal_subtraction` for details.
 
 `basic_demo.ipynb <https://github.com/mjlarson/kingmaker/blob/main/examples/basic_demo.ipynb>`_
     Parameter effects, normalization checks, and sampling/evaluation speed
