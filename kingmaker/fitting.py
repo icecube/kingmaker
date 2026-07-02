@@ -4,6 +4,7 @@ import numpy as np
 import numpy.typing as npt
 from scipy.optimize import minimize
 
+from .distribution import _cdf_and_gradient
 from .pdf import KingPDF
 from .utils import angular_distance
 
@@ -121,6 +122,19 @@ class KingPSFFitter:
 
         # Bin events
         self.event_indices = self._bin_events()
+
+        # Pre-group events by flat bin index for O(1) per-bin lookup in fit_all_bins.
+        # Replaces the per-iteration boolean-mask construction over all events.
+        _shape = tuple(self.parametrization_shape)
+        _idx_arrays = [
+            np.clip(self.event_indices[k], 1, s) - 1  # 0-based, clipped in-range
+            for k, s in zip(self.bin_names, _shape)
+        ]
+        _flat = np.ravel_multi_index(_idx_arrays, _shape)
+        self._event_sort_order = np.argsort(_flat, kind="stable")
+        _sorted_flat = _flat[self._event_sort_order]
+        _n_bins = int(np.prod(_shape))
+        self._bin_boundaries = np.searchsorted(_sorted_flat, np.arange(_n_bins + 1))
 
         # Initialize storage arrays
         self._initialize_storage()
@@ -309,22 +323,21 @@ class KingPSFFitter:
 
             total_bins = np.prod(self.parametrization_shape)
             for bin_indices in tqdm(np.ndindex(*self.parametrization_shape), total=total_bins):
-                # Create mask for events in this bin
-                mask = np.ones(len(weights), dtype=bool)
-                for i, key in enumerate(self.bin_names):
-                    # bin_indices are 0-based, but digitize returns 1-based
-                    mask &= self.event_indices[key] == bin_indices[i] + 1
+                flat_idx = int(np.ravel_multi_index(bin_indices, tuple(self.parametrization_shape)))
+                event_idx = self._event_sort_order[
+                    self._bin_boundaries[flat_idx] : self._bin_boundaries[flat_idx + 1]
+                ]
 
-                if self.remove_weight_outliers:
-                    masked_weights = weights[mask]
+                if self.remove_weight_outliers and len(event_idx) > 0:
+                    bin_weights = weights[event_idx]
                     idx_range = [
-                        int(len(masked_weights) * self.weight_outlier_percentiles[0] / 100),
-                        int(len(masked_weights) * self.weight_outlier_percentiles[1] / 100),
+                        int(len(bin_weights) * self.weight_outlier_percentiles[0] / 100),
+                        int(len(bin_weights) * self.weight_outlier_percentiles[1] / 100),
                     ]
-                    idx = np.digitize(masked_weights, np.unique(masked_weights))
-                    mask[mask] &= (idx_range[0] <= idx) & (idx <= idx_range[1])
+                    idx = np.digitize(bin_weights, np.unique(bin_weights))
+                    event_idx = event_idx[(idx_range[0] <= idx) & (idx <= idx_range[1])]
 
-                n_events = mask.sum()
+                n_events = len(event_idx)
                 param_idx = tuple([g_idx] + list(bin_indices))
                 self.event_counts[param_idx] = n_events
 
@@ -334,7 +347,7 @@ class KingPSFFitter:
                     continue
 
                 # Fit this bin
-                success = self._fit_single_bin(mask, weights, param_idx)
+                success = self._fit_single_bin(event_idx, weights, param_idx)
                 if success:
                     n_fitted += 1
                 else:
@@ -358,16 +371,37 @@ class KingPSFFitter:
         }
 
     def _cdf_chi2(self, cdf_hist, cdf_variance, bins, alpha, beta):
-        expected = self.king_pdf.cdf(bins[1:], alpha, beta)
-        expected *= cdf_hist.max() / expected.max()
-        val = (cdf_hist - expected) ** 2 / np.nextafter(cdf_variance, np.inf)
-        if np.any(~np.isfinite(val)):
-            val[:] = 100000
-        return val.sum() / len(bins)
+        try:
+            cdf, grad_alpha, grad_beta = _cdf_and_gradient(
+                bins[1:], alpha, beta, self.angular_cutoff
+            )
+        except ZeroDivisionError:
+            return 100000.0, np.zeros(2)
+
+        scale = cdf_hist[-1] / cdf[-1]
+        expected = scale * cdf
+        residuals = cdf_hist - expected
+        inv_variance = 1.0 / np.nextafter(cdf_variance, np.inf)
+
+        n_bins = len(bins)
+        val = np.sum(residuals**2 * inv_variance) / n_bins
+        if not np.isfinite(val):
+            return 100000.0, np.zeros(2)
+
+        # d(chi2)/dtheta = (-2*scale/n_bins) * sum(r/var * (dCDF - (cdf/cdf_last)*dCDF_last))
+        weighted_residuals = residuals * inv_variance
+        cdf_ratio = cdf / cdf[-1]
+        grad = (-2.0 * scale / n_bins) * np.array(
+            [
+                np.sum(weighted_residuals * (grad_alpha - cdf_ratio * grad_alpha[-1])),
+                np.sum(weighted_residuals * (grad_beta - cdf_ratio * grad_beta[-1])),
+            ]
+        )
+        return val, grad
 
     def _fit_single_bin(
         self,
-        mask: npt.NDArray[np.bool_],
+        event_idx: npt.NDArray[np.intp],
         weights: npt.NDArray[np.floating],
         param_idx: Tuple[int, ...],
     ) -> bool:
@@ -376,8 +410,8 @@ class KingPSFFitter:
 
         Parameters
         ----------
-        mask : ndarray
-            Boolean mask selecting events in this bin.
+        event_idx : ndarray
+            Integer indices of events in this bin.
         weights : ndarray
             Event weights.
         param_idx : tuple
@@ -389,8 +423,8 @@ class KingPSFFitter:
             True if fit succeeded, False otherwise.
         """
         # Extract events in this bin
-        masked_dpsi = self.dpsi[mask]
-        masked_weights = weights[mask]
+        masked_dpsi = self.dpsi[event_idx]
+        masked_weights = weights[event_idx]
         masked_weights /= masked_weights.sum()  # Normalize
 
         # Create bins for this subset. Also calculate the
@@ -423,9 +457,9 @@ class KingPSFFitter:
                 lambda params: self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, *params),
                 [alpha_guess, beta],
                 method="L-BFGS-B",
-                jac="2-point",
+                jac=True,
                 bounds=[
-                    (np.nextafter(0, np.pi), np.nextafter(self.angular_cutoff, 0)),
+                    (np.nextafter(1e-4, np.pi), np.nextafter(self.angular_cutoff, 0)),
                     (np.nextafter(1, 2), np.nextafter(1000, 1)),
                 ],
             )
