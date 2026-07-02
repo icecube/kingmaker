@@ -183,6 +183,41 @@ print(f"Nonzero fraction: {pdf_matrix.nnz / pdf_matrix.shape[0] / pdf_matrix.sha
 pdf_matrix_2 = mkpdf.evaluate(source_decs, ev_decs, alpha_evt, beta_evt, mask=pdf_matrix)
 ```
 
+`KingSpatialLikelihood` integrates the marginalized path directly. Pass
+`enable_marginalization=True` and a source-declination array at construction;
+`set_events` then precomputes one sparse matrix per spectral index so that
+`evaluate_marginalized_pdf` can interpolate in O(nnz) without additional grid
+lookups on each call:
+
+```python
+from kingmaker.wrapper import KingSpatialLikelihood
+
+catalog_decs = np.radians(np.linspace(-60, 60, 13))
+
+wrapper = KingSpatialLikelihood(
+    signal_events=signal_events,
+    parametrization_bins={'logE': 5, 'dec': 4},
+    spectral_indices=[1.0, 2.0, 3.0, 4.0],
+    angular_cutoff=np.radians(10.0),
+    cache_parameters=False,
+    enable_marginalization=True,
+    marginalization_source_decs=catalog_decs,
+    marginalization_angular_cutoff=np.radians(10.0),
+)
+
+# Per trial — set_events precomputes both PDF types in one pass.
+wrapper.set_events(data_events, source_ras=np.array([src_ra]),
+                   source_decs=np.array([src_dec]))
+
+# Standard point-source PDF: sparse (n_events, 1) matrix.
+# Use .toarray().ravel() to get a dense 1-D array for downstream use.
+pdf_matrix = wrapper.evaluate_pdf(data_events, gamma=2.0)
+pdf_values = pdf_matrix.toarray().ravel()
+
+# RA-marginalized PDF: sparse (n_events, n_sources) matrix.
+pdf_sparse = wrapper.evaluate_marginalized_pdf(data_events, gamma=2.0)
+```
+
 ### Template Smearing
 
 Apply a HEALPix template (e.g. Galactic diffuse emission) to the PSF via spherical harmonic convolution:

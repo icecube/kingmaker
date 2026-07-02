@@ -180,7 +180,9 @@ End-to-end point-source likelihood
 :class:`~kingmaker.fitting.KingPSFFitter` and
 :class:`~kingmaker.pdf.KingPDF` behind a single interface: fit (or load
 cached fit results) once, then evaluate the PDF per-event many times across
-trials.
+trials. It also optionally integrates
+:class:`~kingmaker.pdf.MarginalizedKingPDF` for signal-subtraction
+likelihoods via :meth:`~kingmaker.wrapper.KingSpatialLikelihood.evaluate_marginalized_pdf`.
 
 Continuing with the synthetic ``signal_events`` from the fitting example
 above:
@@ -190,25 +192,42 @@ above:
    from kingmaker.wrapper import KingSpatialLikelihood
    import numpy as np
 
+   # Source catalog for the signal-subtraction (marginalized) path.
+   catalog_decs = np.radians(np.linspace(-60, 60, 13))
+
    wrapper = KingSpatialLikelihood(
        signal_events=signal_events,
        parametrization_bins=parametrization_bins,
        spectral_indices=[1.0, 2.0, 3.0, 4.0],
        cache_parameters=False,
+       # Enable the RA-marginalized path for signal-subtraction likelihoods.
+       enable_marginalization=True,
+       marginalization_source_decs=catalog_decs,
+       marginalization_angular_cutoff=np.radians(10.0),
    )
 
-   # Stand-in "data" events and a source position for one trial.
+   # Stand-in "data" events and a point-source position for one trial.
    data_events = signal_events[:1000]
    source_ra, source_dec = 0.5, 0.2
 
    # Per trial: cache per-event parameters once, then evaluate as needed.
+   # set_events precomputes both the standard and marginalized PDF matrices.
    wrapper.set_events(
        data_events,
        source_ras=np.array([source_ra]),
        source_decs=np.array([source_dec]),
    )
-   pdf_values = wrapper.evaluate_pdf(data_events, gamma=2.0)
-   pdf_values_steeper = wrapper.evaluate_pdf(data_events, gamma=2.5)  # interpolated
+
+   # Standard point-source PDF — sparse (n_events, 1) matrix.
+   # .toarray().ravel() converts to a dense (n_events,) array when needed.
+   pdf_matrix = wrapper.evaluate_pdf(data_events, gamma=2.0)
+   pdf_matrix_steeper = wrapper.evaluate_pdf(data_events, gamma=2.5)  # interpolated
+   pdf_values = pdf_matrix.toarray().ravel()  # dense 1-D for downstream use
+
+   # RA-marginalized PDF — sparse (n_events, n_sources) matrix.
+   # Cheap O(nnz) interpolation on precomputed .data arrays; no interpn call.
+   marg_matrix = wrapper.evaluate_marginalized_pdf(data_events, gamma=2.0)
+   marg_steeper = wrapper.evaluate_marginalized_pdf(data_events, gamma=2.5)
 
 *Common options:*
 
@@ -217,14 +236,26 @@ above:
   the cache; otherwise the fitter runs and (if ``cache_parameters``) saves
   its results there. Use this to avoid refitting across repeated runs/trials.
 - ``spectral_indices``: the gamma grid that gets fit up front;
-  ``evaluate_pdf(events, gamma=...)`` interpolates between the two bracketing
-  values, so pick a range that covers the spectral indices you plan to test.
+  both ``evaluate_pdf`` and ``evaluate_marginalized_pdf`` interpolate between
+  the two bracketing values, so pick a range that covers the spectral indices
+  you plan to test.
 - ``parametrization_bins``: same ``int``-or-edges rules as
   :class:`~kingmaker.fitting.KingPSFFitter`.
-- **Gotcha:** ``evaluate_pdf`` requires ``set_events`` to have been called
-  first with the *same* ``events`` array, and raises ``RuntimeError``
-  otherwise. Calling ``set_events`` repeatedly with identical events/sources
-  is a cheap no-op, so it's safe to call once per trial unconditionally.
+- ``enable_marginalization`` / ``marginalization_source_decs``: set
+  ``enable_marginalization=True`` and supply a source-declination array to
+  activate the marginalized path. At construction,
+  :class:`~kingmaker.pdf.MarginalizedKingPDF` builds its 4D interpolation
+  grid (expensive, done once). ``set_events`` then precomputes one sparse
+  matrix per spectral index; ``evaluate_marginalized_pdf`` interpolates
+  between them in O(nnz) without further grid lookups.
+- ``marginalization_angular_cutoff``: cutoff for the marginalized PDF,
+  independent of the point-source ``angular_cutoff``. Defaults to the same
+  value as ``angular_cutoff`` if not set.
+- **Gotcha:** ``evaluate_pdf`` and ``evaluate_marginalized_pdf`` both require
+  ``set_events`` to have been called first with the *same* ``events`` array,
+  and raise ``RuntimeError`` otherwise. Calling ``set_events`` repeatedly
+  with identical events/sources is a cheap no-op, so it is safe to call once
+  per trial unconditionally.
 
 `likelihood_demo.ipynb <https://github.com/mjlarson/kingmaker/blob/main/examples/likelihood_demo.ipynb>`_
     Full walkthrough including event setup and spectral-index interpolation.

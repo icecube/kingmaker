@@ -624,9 +624,8 @@ class MarginalizedKingPDF:
                 bounds_error=False,
                 fill_value=0.0,
             )
-            nonzero = values > 0.0
             return csr_array(
-                (values[nonzero], (rows[nonzero], cols[nonzero])),
+                (values, (rows, cols)),
                 shape=(n_events, n_sources),
                 dtype=np.float64,
             )

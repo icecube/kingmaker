@@ -93,7 +93,7 @@ class TestEvaluatePdfExactGamma:
         king_pdf = KingPDF(angular_cutoff=likelihood.king_pdf.angular_cutoff)
 
         for gamma_idx, gamma in enumerate(SPECTRAL_INDICES):
-            result = likelihood.evaluate_pdf(events, gamma=gamma).copy()
+            result = likelihood.evaluate_pdf(events, gamma=gamma).toarray().ravel()
 
             alpha = ALPHA_VALUES[gamma_idx][bin_idx]
             beta = BETA_VALUES[gamma_idx][bin_idx]
@@ -109,9 +109,9 @@ class TestEvaluatePdfInterpolatedGamma:
         likelihood.set_events(events, source_ras=np.array([0.0]), source_decs=np.array([0.0]))
 
         gamma = 1.5  # between spectral_indices[0]=1.0 and [1]=2.0
-        result = likelihood.evaluate_pdf(events, gamma=gamma).copy()
-        low = likelihood.evaluate_pdf(events, gamma=1.0).copy()
-        high = likelihood.evaluate_pdf(events, gamma=2.0).copy()
+        result = likelihood.evaluate_pdf(events, gamma=gamma).toarray().ravel()
+        low = likelihood.evaluate_pdf(events, gamma=1.0).toarray().ravel()
+        high = likelihood.evaluate_pdf(events, gamma=2.0).toarray().ravel()
 
         expected = _interp1d(gamma, 1.0, 2.0, low, high)
         np.testing.assert_allclose(result, expected, rtol=1e-10)
@@ -159,10 +159,10 @@ class TestSetEventsNoOp:
         rng = np.random.default_rng(4)
         events = _make_events(10, rng)
         likelihood.set_events(events, source_ras=np.array([0.0]), source_decs=np.array([0.0]))
-        ids_before = {g: id(v) for g, v in likelihood.event_pvalue.items()}
+        ids_before = [id(m) for m in likelihood._pdf_matrices]
 
         likelihood.set_events(events, source_ras=np.array([0.0]), source_decs=np.array([0.0]))
-        ids_after = {g: id(v) for g, v in likelihood.event_pvalue.items()}
+        ids_after = [id(m) for m in likelihood._pdf_matrices]
 
         assert ids_before == ids_after
 
@@ -199,16 +199,15 @@ class TestBufferReuseAcrossTrials:
         likelihood.set_events(
             events_a, source_ras=np.array([src_a[0]]), source_decs=np.array([src_a[1]])
         )
-        result_a = likelihood.evaluate_pdf(events_a, gamma=2.0).copy()
+        result_a = likelihood.evaluate_pdf(events_a, gamma=2.0).toarray().ravel()
         assert result_a[0] > 0.0
         assert result_a[1] == 0.0  # event 1 outside cutoff for source A
 
         likelihood.set_events(
             events_b, source_ras=np.array([src_b[0]]), source_decs=np.array([src_b[1]])
         )
-        result_b = likelihood.evaluate_pdf(events_b, gamma=2.0).copy()
-        assert result_b[0] == 0.0  # event 0 now outside cutoff for source B --
-        # must NOT retain the nonzero value computed for source A.
+        result_b = likelihood.evaluate_pdf(events_b, gamma=2.0).toarray().ravel()
+        assert result_b[0] == 0.0  # event 0 now outside cutoff for source B
         assert result_b[1] > 0.0
 
 
@@ -230,16 +229,16 @@ class TestPdfFromNorm:
         np.testing.assert_allclose(result, expected, rtol=1e-10)
 
 
-class TestBufferResize:
-    def test_resizes_on_event_count_change(self, likelihood):
+class TestPdfMatricesShape:
+    def test_shape_matches_event_count(self, likelihood):
         rng = np.random.default_rng(8)
-        events_5 = _make_events(5, rng)  # 15 events
+        events_5 = _make_events(5, rng)
         likelihood.set_events(events_5, source_ras=np.array([0.0]), source_decs=np.array([0.0]))
-        assert len(likelihood._result_buffer) == len(events_5)
+        assert all(m.shape == (len(events_5), 1) for m in likelihood._pdf_matrices)
 
-        events_10 = _make_events(10, rng)  # 30 events
+        events_10 = _make_events(10, rng)
         likelihood.set_events(events_10, source_ras=np.array([0.0]), source_decs=np.array([0.0]))
-        assert len(likelihood._result_buffer) == len(events_10)
+        assert all(m.shape == (len(events_10), 1) for m in likelihood._pdf_matrices)
 
         result = likelihood.evaluate_pdf(events_10, gamma=2.0)
-        assert len(result) == len(events_10)
+        assert result.shape == (len(events_10), 1)

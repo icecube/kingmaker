@@ -423,7 +423,7 @@ class KingPSFFitter:
                 lambda params: self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, *params),
                 [alpha_guess, beta],
                 method="L-BFGS-B",
-                jac="3-point",
+                jac="2-point",
                 bounds=[
                     (np.nextafter(0, np.pi), np.nextafter(self.angular_cutoff, 0)),
                     (np.nextafter(1, 2), np.nextafter(1000, 1)),

@@ -5,7 +5,9 @@ from os.path import exists
 import logging
 import numpy as np
 
-from .pdf import KingPDF
+from scipy.sparse import csr_array
+
+from .pdf import KingPDF, MarginalizedKingPDF
 from .fitting import KingPSFFitter
 from .utils import angular_distance, _pre_mask_and_distance, _interp1d
 
@@ -32,6 +34,11 @@ class KingSpatialLikelihood:
 
     king_pdf: KingPDF
 
+    # Marginalized PDF (optional — enabled by passing marg_source_decs to __init__)
+    mkpdf: Optional[MarginalizedKingPDF]
+    _marg_source_decs: Optional[npt.NDArray[np.floating]]
+    _marg_matrices: List[csr_array]
+
     # Source-level information
     source_ras: Optional[npt.NDArray[Any]] = None
     source_decs: Optional[npt.NDArray[Any]] = None
@@ -41,7 +48,7 @@ class KingSpatialLikelihood:
     events: Optional[Any] = None
     event_distances: Union[npt.NDArray[np.floating], List[float]]
     map_index: Union[npt.NDArray[np.integer], List[int]]
-    event_pvalue: Dict[float, Union[List, npt.NDArray[np.floating]]]
+    _pdf_matrices: List[csr_array]
 
     # General warning flags
     multiple_source_warning_logged: bool = False
@@ -67,6 +74,13 @@ class KingSpatialLikelihood:
         true_ra_name: str = "trueRa",
         true_dec_name: str = "trueDec",
         true_energy_name: str = "trueE",
+        enable_marginalization: bool = False,
+        marginalization_source_decs: Optional[npt.NDArray[np.floating]] = None,
+        marginalization_angular_cutoff: Optional[float] = None,
+        marginalization_points_alpha: Optional[npt.NDArray[np.floating]] = None,
+        marginalization_points_beta: Optional[npt.NDArray[np.floating]] = None,
+        marginalization_n_signed_delta_dec: int = 200,
+        marginalization_n_ra_bins: int = 100,
     ):
         # Store some of the configuration parameters for this instance.
         # Note that we don't need to store the signal events, dpsi_nbins,
@@ -78,8 +92,7 @@ class KingSpatialLikelihood:
 
         # Set some default values for the event-level parameters.
         self.event_distances, self.map_index = [], []
-        self.event_pvalue = {}
-        self._result_buffer: npt.NDArray[np.floating] = np.array([])
+        self._pdf_matrices: List[csr_array] = []
 
         # Obtain the King distribution parameters for all bins. If we're caching parameters
         # and a cache file exists, load from the cache instead of fitting. Otherwise,
@@ -134,6 +147,34 @@ class KingSpatialLikelihood:
         # on the fitted grid once at init. set_events looks up per-event norms from
         # this array using the same nearest-bin indices as alpha/beta.
         self.norm_values = self.king_pdf.norm(self.alpha_values, self.beta_values)
+
+        # Optionally build the RA-marginalized PDF for signal-subtraction likelihoods.
+        self.mkpdf = None
+        self._marg_source_decs = None
+        self._marg_matrices = []
+        if enable_marginalization:
+            if marginalization_source_decs is None:
+                raise ValueError(
+                    "enable_marginalization=True requires marginalization_source_decs."
+                )
+            self._marg_source_decs = np.asarray(marginalization_source_decs, dtype=np.float64)
+            cutoff = (
+                marginalization_angular_cutoff
+                if marginalization_angular_cutoff is not None
+                else angular_cutoff
+            )
+            kwargs: Dict[str, Any] = {}
+            if marginalization_points_alpha is not None:
+                kwargs["points_alpha"] = marginalization_points_alpha
+            if marginalization_points_beta is not None:
+                kwargs["points_beta"] = marginalization_points_beta
+            self.mkpdf = MarginalizedKingPDF(
+                source_declination=self._marg_source_decs,
+                angular_cutoff=cutoff,
+                n_signed_delta_dec=marginalization_n_signed_delta_dec,
+                n_ra_bins=marginalization_n_ra_bins,
+                **kwargs,
+            )
         return
 
     def _events_match(self, events: npt.NDArray[Any]) -> bool:
@@ -249,22 +290,46 @@ class KingSpatialLikelihood:
             self.event_mask = all_dists < cutoff
             self.event_distances = all_dists[self.event_mask]
 
-        # Reuse the buffer across trials when the event count is unchanged.
-        # The buffer is always fully zeroed here so that events outside
-        # event_mask are guaranteed to be zero on every call.
-        if len(self._result_buffer) != len(events):
-            self._result_buffer = np.zeros(len(events))
-        else:
-            self._result_buffer[:] = 0.0
-
+        event_rows = np.where(self.event_mask)[0]
         all_alpha, all_beta, all_norm = self._lookup_event_grid(events)
-        for i, gamma in enumerate(self.spectral_indices):
+        self._pdf_matrices = []
+        for i in range(len(self.spectral_indices)):
             # Evaluate the King PDF directly using the precomputed per-bin norm.
             # alpha/beta come from the fitted grid (validated at fit time) and
             # event_distances are already within angular_cutoff by construction.
-            self.event_pvalue[gamma] = self.king_pdf.pdf_from_norm(
+            values = self.king_pdf.pdf_from_norm(
                 self.event_distances, all_alpha[i], all_beta[i], all_norm[i]
             )
+            self._pdf_matrices.append(
+                csr_array(
+                    (values, (event_rows, np.zeros(len(event_rows), dtype=np.intp))),
+                    shape=(len(events), 1),
+                    dtype=np.float64,
+                )
+            )
+
+        # Marginalized path: precompute one sparse (n_events, n_sources) matrix per
+        # spectral index. The first call establishes the sparsity structure; all
+        # subsequent calls pass that result as mask= so interpn operates on the same
+        # fixed (event, source) pairs. The mask path in MarginalizedKingPDF.evaluate()
+        # does not filter values > 0, so every matrix in _marg_matrices is guaranteed to
+        # share identical .indices and .indptr — a requirement for the scalar lerp
+        # on .data in evaluate_marginalized_pdf.
+        if self.mkpdf is not None:
+            all_alpha_full, all_beta_full = self._lookup_all_events_grid(events)
+            self._marg_matrices = []
+            mask_marg: Optional[csr_array] = None
+            for i in range(len(self.spectral_indices)):
+                mat = self.mkpdf.evaluate(
+                    self._marg_source_decs,
+                    events["dec"],
+                    all_alpha_full[i],
+                    all_beta_full[i],
+                    mask=mask_marg,
+                )
+                if mask_marg is None:
+                    mask_marg = mat
+                self._marg_matrices.append(mat)
         return
 
     def _lookup_event_grid(self, events):
@@ -287,6 +352,31 @@ class KingSpatialLikelihood:
 
         idx = (slice(None), *event_indices)
         return self.alpha_values[idx], self.beta_values[idx], self.norm_values[idx]
+
+    def _lookup_all_events_grid(self, events):
+        """
+        Nearest-bin lookup of alpha and beta for every event, without applying
+        ``event_mask``.
+
+        Used by :meth:`set_events` to supply per-event PSF parameters for
+        :meth:`MarginalizedKingPDF.evaluate`, which performs its own angular
+        masking internally and therefore needs parameters for the full event set.
+
+        Returns
+        -------
+        alpha : ndarray, shape (n_gamma, n_events)
+        beta  : ndarray, shape (n_gamma, n_events)
+        """
+
+        def index(centers, values):
+            i = np.searchsorted(centers, values).clip(1, len(centers) - 1)
+            return np.where(values - centers[i - 1] < centers[i] - values, i - 1, i)
+
+        event_indices = tuple(
+            index(self.bin_centers[i], events[key]) for i, key in enumerate(self.keys)
+        )
+        idx = (slice(None), *event_indices)
+        return self.alpha_values[idx], self.beta_values[idx]
 
     def get_alpha_beta(self, events):
         """
@@ -366,14 +456,13 @@ class KingSpatialLikelihood:
             _interp1d(gamma, gamma_low, gamma_high, beta[idx], beta[idx + 1]),
         )
 
-    def evaluate_pdf(self, events: npt.NDArray[Any], gamma: float = 2) -> npt.NDArray[np.floating]:
+    def evaluate_pdf(self, events: npt.NDArray[Any], gamma: float = 2) -> csr_array:
         """
         Evaluate the King PDF at each event's position for a given spectral index.
 
-        Uses the per-event distances and PDF values cached by the most recent
-        call to :meth:`set_events`, interpolating over spectral index as
-        needed. This makes repeated calls with different ``gamma`` values
-        cheap once :meth:`set_events` has been called for a given event set.
+        Uses the sparse PDF matrices cached by the most recent call to
+        :meth:`set_events`, interpolating over spectral index as needed via a
+        scalar lerp on the underlying ``.data`` arrays — O(nnz) and cache-warm.
 
         Parameters
         ----------
@@ -387,9 +476,10 @@ class KingSpatialLikelihood:
 
         Returns
         -------
-        ndarray
-            PDF value(s) (probability/steradian) for each event in ``events``,
-            in the same order. Zero for events outside the angular cutoff.
+        csr_array, shape (n_events, 1)
+            Sparse PDF matrix. Nonzero entries hold the King PDF value
+            (probability/steradian) for each event within the angular cutoff;
+            events outside the cutoff are implicitly zero.
 
         Raises
         ------
@@ -397,27 +487,91 @@ class KingSpatialLikelihood:
             If ``events`` does not match the events passed to the most recent
             call to :meth:`set_events`.
         """
-        # Require that set_events has been called for these events.
         if not self._events_match(events):
             raise RuntimeError(
                 "The events provided to evaluate_pdf do not match the events that were used to calculate the per-event parameters."
                 " Please ensure that you call set_events with the same events that you later pass into evaluate_pdf."
             )
 
-        # Interpolate over gamma to get the final result for each event
         idx = np.clip(
-            np.searchsorted(self.spectral_indices, gamma) - 1, 0, len(self.spectral_indices) - 2
+            np.searchsorted(self.spectral_indices, gamma) - 1,
+            0,
+            len(self.spectral_indices) - 2,
         )
 
-        gamma_low, gamma_high = self.spectral_indices[idx], self.spectral_indices[idx + 1]
-        self._result_buffer[self.event_mask] = _interp1d(
-            gamma,
-            gamma_low,
-            gamma_high,
-            self.event_pvalue[gamma_low],
-            self.event_pvalue[gamma_high],
+        gamma_low = self.spectral_indices[idx]
+        gamma_high = self.spectral_indices[idx + 1]
+        t = float(gamma - gamma_low) / float(gamma_high - gamma_low)
+        lo = self._pdf_matrices[idx]
+        hi = self._pdf_matrices[idx + 1]
+        result = lo.copy()
+        result.data[:] = (1.0 - t) * lo.data + t * hi.data
+        return result.tocsr()
+
+    def evaluate_marginalized_pdf(self, events: npt.NDArray[Any], gamma: float = 2) -> csr_array:
+        """
+        Evaluate the RA-marginalized King PDF for all (event, source) pairs.
+
+        Returns a sparse ``(n_events, n_sources)`` matrix whose nonzero entries
+        are the signal-subtraction PDF values at the requested spectral index.
+        The result is obtained by linearly interpolating the precomputed sparse
+        matrices from :meth:`set_events` directly on their underlying ``.data``
+        arrays — both bracketing matrices share the same sparsity structure, so
+        element-wise interpolation is valid and O(nnz).
+
+        Must be called after :meth:`set_events` with the same ``events`` array.
+        Requires ``enable_marginalization=True`` at construction.
+
+        Parameters
+        ----------
+        events : structured array
+            Data events. Must match the events passed to the most recent
+            :meth:`set_events` call.
+        gamma : float, optional
+            Spectral index at which to evaluate. Interpolated between the two
+            nearest values in ``spectral_indices``. Default is 2.0.
+
+        Returns
+        -------
+        csr_array, shape (n_events, n_sources)
+            Sparse marginalized PDF matrix. Zero entries correspond to
+            (event, source) pairs separated by more than the marginalization
+            angular cutoff.
+
+        Raises
+        ------
+        RuntimeError
+            If marginalization was not enabled at construction, if
+            :meth:`set_events` has not been called, or if ``events`` does not
+            match the cached event set.
+        """
+        if self.mkpdf is None:
+            raise RuntimeError(
+                "Marginalized PDF evaluation requires enable_marginalization=True "
+                "and marginalization_source_decs to be set at construction."
+            )
+        if not self._events_match(events):
+            raise RuntimeError(
+                "The events provided to evaluate_marginalized_pdf do not match "
+                "the events passed to the most recent set_events call."
+            )
+        if not self._marg_matrices:
+            raise RuntimeError("No marginalized PDF matrices are cached. Call set_events first.")
+
+        idx = np.clip(
+            np.searchsorted(self.spectral_indices, gamma) - 1,
+            0,
+            len(self.spectral_indices) - 2,
         )
-        return self._result_buffer
+        gamma_low = self.spectral_indices[idx]
+        gamma_high = self.spectral_indices[idx + 1]
+        t = float(gamma - gamma_low) / float(gamma_high - gamma_low)
+
+        lo = self._marg_matrices[idx]
+        hi = self._marg_matrices[idx + 1]
+        result = lo.copy()
+        result.data[:] = (1.0 - t) * lo.data + t * hi.data
+        return result.tocsr()
 
 
 # class KingTemplateLikelihood:

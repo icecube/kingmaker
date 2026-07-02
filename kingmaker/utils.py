@@ -170,7 +170,7 @@ def _marginalize_ra(
     return result
 
 
-@njit(parallel=True, cache=True)
+@njit(parallel=False, cache=True)
 def _build_marginalized_grid(
     dec_true_grid: npt.NDArray[np.float64],
     alpha_grid: npt.NDArray[np.float64],
@@ -184,8 +184,9 @@ def _build_marginalized_grid(
     Build the full 4D RA-marginalized King PDF grid.
 
     Iterates over (dec_true, alpha, beta), calling _marginalize_ra for each
-    triple and storing results in the output array. The dec_true axis is
-    parallelized with prange.
+    triple and storing results in the output array. The dec_true axis could
+    parallelized with prange, but this needs to wait until after numba provides
+    better support for limiting CPU usage.
 
     Parameters
     ----------
