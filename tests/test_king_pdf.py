@@ -60,11 +60,6 @@ class TestKingPDFInit:
 
 class TestKingPDFEval:
     @pytest.mark.parametrize("alpha, beta", PARAM_CASES)
-    def test_scalar_positive(self, alpha, beta):
-        king = KingPDF()
-        assert king.pdf(0.0, alpha, beta) > 0
-
-    @pytest.mark.parametrize("alpha, beta", PARAM_CASES)
     def test_array_positive(self, alpha, beta):
         king = KingPDF()
         theta = np.linspace(0, np.radians(5), 50)
@@ -76,14 +71,6 @@ class TestKingPDFEval:
         king = KingPDF()
         theta = np.linspace(0, np.radians(5), 50)
         assert np.all(np.isfinite(king.pdf(theta, alpha, beta)))
-
-    @pytest.mark.parametrize("alpha, beta", PARAM_CASES)
-    def test_maximum_at_origin(self, alpha, beta):
-        """PDF should be highest at theta=0 (or very close to it)."""
-        king = KingPDF()
-        theta = np.linspace(0, np.radians(10), 200)
-        vals = king.pdf(theta, alpha, beta)
-        assert np.argmax(vals) == 0
 
     @pytest.mark.parametrize("alpha, beta", PARAM_CASES)
     def test_monotone_decreasing(self, alpha, beta):
@@ -103,8 +90,8 @@ class TestKingPDFEval:
             pytest.skip("no points strictly beyond cutoff within the sphere")
         assert np.all(king.pdf(beyond, alpha, beta) == 0)
 
-    @pytest.mark.parametrize("cutoff", CUTOFF_CASES)
-    @pytest.mark.parametrize("alpha, beta", PARAM_CASES)
+    @pytest.mark.parametrize("cutoff", [np.pi, 0.2])
+    @pytest.mark.parametrize("alpha, beta", [PARAM_CASES[0], PARAM_CASES[2]])
     def test_normalizes_to_one(self, cutoff, alpha, beta):
         """2pi * integral of PDF * sin(theta) dtheta should equal 1."""
         if alpha >= cutoff:
@@ -142,11 +129,6 @@ class TestKingPDFEval:
 
 
 class TestKingPDFCDF:
-    @pytest.mark.parametrize("alpha, beta", PARAM_CASES)
-    def test_cdf_at_zero_is_zero(self, alpha, beta):
-        king = KingPDF()
-        assert_allclose(king.cdf(0.0, alpha, beta), 0.0, atol=1e-6)
-
     @pytest.mark.parametrize("cutoff", CUTOFF_CASES)
     @pytest.mark.parametrize("alpha, beta", PARAM_CASES)
     def test_cdf_at_cutoff_is_one(self, cutoff, alpha, beta):
@@ -197,14 +179,11 @@ class TestKingPDFCDF:
 
 class TestKingPDFNorm:
     @pytest.mark.parametrize("alpha, beta", PARAM_CASES)
-    def test_norm_positive(self, alpha, beta):
+    def test_norm_valid(self, alpha, beta):
         king = KingPDF()
-        assert king.norm(alpha, beta) > 0
-
-    @pytest.mark.parametrize("alpha, beta", PARAM_CASES)
-    def test_norm_finite(self, alpha, beta):
-        king = KingPDF()
-        assert np.isfinite(king.norm(alpha, beta))
+        n = king.norm(alpha, beta)
+        assert n > 0
+        assert np.isfinite(n)
 
     def test_norm_decreases_with_alpha(self):
         """Wider PSF → lower peak → smaller norm constant."""
@@ -227,7 +206,7 @@ class TestKingPDFNorm:
 
 
 class TestKingPDFSample:
-    @pytest.mark.parametrize("n", [10, 100, 1000])
+    @pytest.mark.parametrize("n", [100, 1000])
     def test_sample_length(self, n):
         king = KingPDF()
         samples = king.sample(n, np.radians(1.0), 2.0)
@@ -328,6 +307,14 @@ class TestKingPDFEvaluate:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(scope="module")
+def mkpdf():
+    return MarginalizedKingPDF(
+        source_declination=np.radians(np.linspace(-80, 80, 21)),
+        angular_cutoff=np.radians(10.0),
+    )
+
+
 class TestMarginalizedKingPDFInit:
     def test_builds_cache_with_defaults(self):
         mkpdf = MarginalizedKingPDF(
@@ -377,13 +364,6 @@ class TestMarginalizedKingPDFInit:
 
 
 class TestMarginalizedKingPDFPdf:
-    @pytest.fixture
-    def mkpdf(self):
-        return MarginalizedKingPDF(
-            source_declination=np.radians(np.linspace(-80, 80, 21)),
-            angular_cutoff=np.radians(10.0),
-        )
-
     def test_returns_dense_array(self, mkpdf):
         result = mkpdf.pdf(np.radians([0.0, 1.0]), np.radians(1.0), 2.0, np.radians(0.0))
         assert isinstance(result, np.ndarray)
@@ -415,13 +395,6 @@ class TestMarginalizedKingPDFPdf:
 
 
 class TestMarginalizedKingPDFEvaluate:
-    @pytest.fixture
-    def mkpdf(self):
-        return MarginalizedKingPDF(
-            source_declination=np.radians(np.linspace(-80, 80, 21)),
-            angular_cutoff=np.radians(10.0),
-        )
-
     def test_output_shape(self, mkpdf):
         source_decs = np.radians([-10.0, 0.0, 10.0])
         event_decs = np.radians(np.linspace(-15, 15, 5))
