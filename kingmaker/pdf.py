@@ -4,7 +4,8 @@ import numpy.typing as npt
 import healpy as hp
 from scipy.interpolate import interpn
 from scipy.sparse import csr_array
-from scipy.special import legendre_p_all, sph_harm_y_all
+from scipy.special import legendre_p_all, sph_harm_y_all, gammaln
+from numpy.polynomial.laguerre import laggauss
 
 from .distribution import _log10pi
 from .distribution import _norm, _unnormalized_pdf, _unnormalized_cdf
@@ -1115,3 +1116,460 @@ class TemplateSmearedKingPDF(KingPDF):
 
         colatitude, longitude = hp.pix2ang(self.nside, pixel_indices)
         return longitude, np.pi / 2 - colatitude  # reco_ra, reco_dec
+
+
+class ExtendedSourceKingPDF:
+    """
+    King PSF convolved with a Rayleigh (Gaussian) source extension.
+
+    Precomputes a 4D lookup table of convolved PDF values over
+    (log10(alpha), log10(beta), log10(extension), psi) using Gauss-Laguerre
+    quadrature on the inverse-gamma scale mixture representation of the King
+    distribution. At runtime, evaluates each event via quadrilinear
+    interpolation into this table.
+
+    Both the King PSF and the Rayleigh extension are axially symmetric, so the
+    convolution depends only on the scalar angular distance psi between the
+    event and the source — not on the full sky coordinates of either.
+
+    Parameters
+    ----------
+    angular_cutoff : float, optional
+        Maximum angular separation in radians. Default is pi.
+    maximum_sigma : float, optional
+        Number of source-extension radii beyond the King angular_cutoff
+        that ``evaluate()`` considers for each source. For a source with
+        extension r₀, events at angular distance greater than
+        ``maximum_sigma * r₀ + angular_cutoff`` are skipped. Default is 3.
+    points_alpha : ndarray, optional
+        Alpha grid points in radians. Default: 30 log-spaced values from
+        0.05 degrees to pi.
+    points_beta : ndarray, optional
+        Beta grid points. Default: 20 log-spaced values from ~1.023 to 10.
+    points_extension : ndarray, optional
+        Extension radius grid points in radians. Default: 20 log-spaced values
+        from 0.05 degrees to 5 degrees.
+    points_psi : ndarray, optional
+        Angular separation grid points in radians. Default: 0 followed by 500
+        log-spaced values from 1e-4 rad to angular_cutoff.
+    n_quad : int, optional
+        Number of Gauss-Laguerre quadrature nodes for the scale mixture
+        integral. Default is 32.
+    """
+
+    def __init__(
+        self,
+        *,
+        angular_cutoff: float = np.pi,
+        maximum_sigma: float = 3.0,
+        points_alpha: Optional[npt.NDArray[np.floating]] = None,
+        points_beta: Optional[npt.NDArray[np.floating]] = None,
+        points_extension: Optional[npt.NDArray[np.floating]] = None,
+        points_psi: Optional[npt.NDArray[np.floating]] = None,
+        n_quad: int = 32,
+    ) -> None:
+        self.angular_cutoff = float(angular_cutoff)
+        self.maximum_sigma = float(maximum_sigma)
+
+        self.n_quad = n_quad
+
+        self._points_alpha = np.sort(
+            np.asarray(
+                points_alpha
+                if points_alpha is not None
+                else np.logspace(np.log10(np.radians(0.05)), _log10pi, 30),
+                dtype=np.float64,
+            )
+        )
+        self._points_beta = np.sort(
+            np.asarray(
+                points_beta if points_beta is not None else np.logspace(0.01, 1, 20),
+                dtype=np.float64,
+            )
+        )
+        self._points_extension = np.sort(
+            np.asarray(
+                points_extension
+                if points_extension is not None
+                else np.logspace(np.log10(np.radians(0.05)), np.log10(np.radians(5.0)), 20),
+                dtype=np.float64,
+            )
+        )
+        # The psi table must reach the widest possible search window so that
+        # interpn stays in-bounds for all events accepted by evaluate().
+        # That window is maximum_sigma * max_ext + angular_cutoff, capped at π.
+        _psi_max = min(
+            self.maximum_sigma * self._points_extension[-1] + angular_cutoff,
+            np.pi,
+        )
+        self._points_psi = np.sort(
+            np.asarray(
+                points_psi
+                if points_psi is not None
+                else np.concatenate([[0.0], np.logspace(-4, np.log10(_psi_max), 500)]),
+                dtype=np.float64,
+            )
+        )
+
+        if np.any(self._points_alpha <= 0):
+            raise ValueError(
+                "points_alpha contains values <= 0. The King distribution is not defined here."
+            )
+        if np.any(self._points_beta <= 1):
+            raise ValueError(
+                "points_beta contains values <= 1. The King distribution is not defined here."
+            )
+        if np.any(self._points_extension <= 0):
+            raise ValueError(
+                "points_extension contains values <= 0. Extension radius must be positive."
+            )
+        if np.any(self._points_extension > np.radians(5.0) + 1e-12):
+            raise ValueError(
+                "points_extension contains values > 5 degrees. The flat-sky (Rayleigh) "
+                "approximation error exceeds ~0.5% at this scale; use a vMF extension instead."
+            )
+
+        self._log10_points_alpha = np.log10(self._points_alpha)
+        self._log10_points_beta = np.log10(self._points_beta)
+        self._log10_points_extension = np.log10(self._points_extension)
+
+        # Gauss-Laguerre nodes and weights for the scale mixture integral.
+        # The substitution t = beta*alpha^2 / v^2 maps the InvGamma weight
+        # exp(-beta*alpha^2/v^2) to the standard Gauss-Laguerre form e^{-t}.
+        self._quad_nodes, self._quad_weights = laggauss(n_quad)
+
+        self._build_table()
+
+    def _scale_mixture_pdf(
+        self,
+        psi: npt.NDArray[np.floating],
+        alpha: npt.NDArray[np.floating],
+        beta: npt.NDArray[np.floating],
+        extension: float,
+    ) -> npt.NDArray[np.floating]:
+        """
+        Evaluate the King–Rayleigh convolution via Gauss-Laguerre quadrature.
+
+        Derivation
+        ----------
+        Consider integrating a Rayleigh PDF over an unknown scale v^2, weighted
+        by an InvGamma(kappa, c) density:
+
+            integral_0^inf  [psi/v^2 * exp(-psi^2/(2v^2))]   <- Rayleigh
+                            * [c^kappa/Gamma(kappa) * (v^2)^{-kappa-1} * exp(-c/v^2)]
+                            dv^2
+
+        The two exponentials combine: exp(-psi^2/(2v^2)) * exp(-c/v^2)
+        = exp(-(psi^2/2 + c)/v^2). Collecting powers of v^2 gives an integrand
+        proportional to (v^2)^{-(kappa+2)} * exp(-A/v^2) with A = c + psi^2/2.
+        That integral is a standard gamma-function result: Gamma(kappa+1)/A^{kappa+1}.
+        Substituting back:
+
+            result = psi * kappa * c^kappa / (c + psi^2/2)^{kappa+1}
+                   = psi/c * kappa / (1 + psi^2/(2c))^{kappa+1}
+
+        Matching to the flat-sky King PDF psi/alpha^2 * (1-1/beta)
+        * (1 + psi^2/(2*beta*alpha^2))^{-beta} requires kappa = beta-1 and
+        c = beta*alpha^2. The King distribution is therefore exactly equal
+        to an InvGamma-weighted integral of Rayleigh distributions.
+
+        For the convolution with a Rayleigh source extension of radius r0: the
+        event position is the vector sum of an independent PSF displacement
+        (Rayleigh with scale v^2) and a source-extent displacement (Rayleigh
+        with scale r0^2). Adding two independent 2D Gaussian displacements
+        produces a 2D Gaussian with combined scale v^2 + r0^2. Replacing v^2
+        with v^2 + r0^2 inside the integral above gives the convolution.
+
+        The substitution t = c/v^2 (so v^2 = c/t) maps exp(-c/v^2) to exp(-t),
+        putting the integral in standard Gauss-Laguerre form
+        integral_0^inf f(t) * e^{-t} dt, evaluated here with fixed nodes and
+        weights from laggauss(n_quad). After the substitution the integral
+        becomes:
+
+            p_conv = psi / Gamma(beta-1)
+                     * integral_0^inf  t^(beta-1) / (c + r0^2 * t)
+                                       * exp(-psi^2 * t / (2*(c + r0^2*t)))
+                                       * e^{-t} dt
+
+        Setting r0 = 0 recovers the flat-sky King PDF exactly. Uses psi^2/2
+        throughout rather than 1 - cos(psi); error is below 0.5% for psi and
+        r0 below 5 degrees.
+
+        Parameters
+        ----------
+        psi : ndarray
+            Angular separation(s) from the source in radians.
+        alpha : ndarray
+            King alpha parameter(s) in radians.
+        beta : ndarray
+            King beta parameter(s). Must be > 1.
+        extension : float
+            Rayleigh source extension radius in radians. Must be <= 5 degrees.
+
+        Returns
+        -------
+        ndarray
+            Convolved PDF values, same shape as the broadcast of inputs.
+            Zero wherever psi = 0.
+
+        Raises
+        ------
+        NotImplementedError
+            If extension exceeds 5 degrees (np.radians(5)), where the
+            flat-sky approximation error exceeds ~0.5% and a vMF extension
+            should be used instead.
+        """
+        if float(extension) > np.radians(5.0) + 1e-12:
+            raise NotImplementedError(
+                f"extension={np.degrees(float(extension)):.2f} deg exceeds the 5-degree "
+                "limit for the flat-sky (Rayleigh) approximation. "
+                "A von Mises-Fisher extension needs to be implemented "
+                " for larger angular scales."
+            )
+
+        psi, alpha, beta = np.broadcast_arrays(
+            np.asarray(psi, dtype=np.float64),
+            np.asarray(alpha, dtype=np.float64),
+            np.asarray(beta, dtype=np.float64),
+        )
+
+        r0_sq = float(extension) ** 2
+        c = beta * alpha**2  # InvGamma scale: beta * alpha^2
+
+        # Broadcast data arrays against the quadrature axis
+        t = self._quad_nodes  # (n_quad,)
+        w = self._quad_weights  # (n_quad,)
+        c_q = c[..., np.newaxis]  # (..., 1)
+        psi_q = psi[..., np.newaxis]  # (..., 1)
+        beta_q = beta[..., np.newaxis]  # (..., 1)
+
+        denom = c_q + r0_sq * t  # (..., n_quad); always positive
+
+        # t^(beta-1) via log to stay in float64 range for large beta or t
+        t_pow = np.exp((beta_q - 1.0) * np.log(t))  # (..., n_quad)
+
+        integrand = psi_q * t_pow / denom * np.exp(-(psi_q**2) * t / (2.0 * denom))
+        # (..., n_quad); naturally zero when psi = 0
+
+        quad_sum = (w * integrand).sum(axis=-1)  # (...)
+
+        return quad_sum / np.exp(gammaln(beta - 1.0))
+
+    def _build_table(self) -> None:
+        """
+        Precompute the convolved PDF on the (alpha, beta, extension, psi) grid.
+
+        Evaluates _scale_mixture_pdf over the full four-dimensional parameter
+        space by looping over extension values (keeping one (n_alpha, n_beta,
+        n_psi) slice in memory at a time) and stacking the results. Stores the
+        result as self._table with shape (n_alpha, n_beta, n_extension, n_psi)
+        for use by interpn at runtime.
+        """
+        # Broadcast axes over (alpha, beta, psi) for each extension slice.
+        # Shape annotations assume n_alpha, n_beta, n_psi grid sizes.
+        alpha_g = self._points_alpha[:, np.newaxis, np.newaxis]  # (n_alpha, 1, 1)
+        beta_g = self._points_beta[np.newaxis, :, np.newaxis]  # (1, n_beta, 1)
+        psi_g = self._points_psi[np.newaxis, np.newaxis, :]  # (1, 1, n_psi)
+
+        slices = [
+            self._scale_mixture_pdf(psi_g, alpha_g, beta_g, float(ext))
+            for ext in self._points_extension
+        ]  # each element: (n_alpha, n_beta, n_psi)
+
+        self._table = np.stack(slices, axis=2)  # (n_alpha, n_beta, n_extension, n_psi)
+
+    def pdf(
+        self,
+        x: Union[float, npt.NDArray[np.floating]],
+        alpha: Union[float, npt.NDArray[np.floating]],
+        beta: Union[float, npt.NDArray[np.floating]],
+        extension: Union[float, npt.NDArray[np.floating]],
+    ) -> npt.NDArray[np.floating]:
+        """
+        Evaluate the convolved PDF at angular separation(s) x.
+
+        Parameters
+        ----------
+        x : float or ndarray
+            Angular separation(s) from the source in radians.
+        alpha : float or ndarray
+            Per-event King alpha parameter in radians.
+        beta : float or ndarray
+            Per-event King beta parameter.
+        extension : float or ndarray
+            Source extension radius in radians.
+
+        Returns
+        -------
+        ndarray
+            Convolved PDF values in probability/steradian.
+        """
+        x = np.asarray(x, dtype=np.float64)
+        alpha = np.asarray(alpha, dtype=np.float64)
+        beta = np.asarray(beta, dtype=np.float64)
+        extension = np.asarray(extension, dtype=np.float64)
+        x, alpha, beta, extension = np.broadcast_arrays(x, alpha, beta, extension)
+        shape = x.shape
+        x = np.atleast_1d(x).ravel()
+        alpha = np.atleast_1d(alpha).ravel()
+        beta = np.atleast_1d(beta).ravel()
+        extension = np.atleast_1d(extension).ravel()
+
+        result = np.zeros(len(x))
+        in_bounds = x <= self._points_psi[-1]
+
+        if np.any(in_bounds):
+            queries = np.column_stack(
+                [
+                    np.log10(alpha[in_bounds]),
+                    np.log10(beta[in_bounds]),
+                    np.log10(extension[in_bounds]),
+                    x[in_bounds],
+                ]
+            )
+
+            # _table stores the 1D radial density f(ψ): ∫₀^∞ f dψ = 1.
+            # Per-steradian density: p(ψ) = f(ψ) / (2π ψ)  [flat-sky: dΩ = 2π ψ dψ].
+            f_psi = interpn(
+                (
+                    self._log10_points_alpha,
+                    self._log10_points_beta,
+                    self._log10_points_extension,
+                    self._points_psi,
+                ),
+                self._table,
+                queries,
+                method="linear",
+                bounds_error=True,
+            )
+
+            x_in = x[in_bounds]
+            with np.errstate(invalid="ignore", divide="ignore"):
+                result[in_bounds] = np.where(x_in > 0.0, f_psi / (2.0 * np.pi * x_in), 0.0)
+
+        return result.reshape(shape)
+
+    def evaluate(
+        self,
+        source_ras: npt.NDArray[np.floating],
+        source_decs: npt.NDArray[np.floating],
+        source_extensions: npt.NDArray[np.floating],
+        event_ras: npt.NDArray[np.floating],
+        event_decs: npt.NDArray[np.floating],
+        alpha: npt.NDArray[np.floating],
+        beta: npt.NDArray[np.floating],
+        *,
+        mask: Optional[csr_array] = None,
+    ) -> csr_array:
+        """
+        Evaluate the extended-source convolved PDF for all (event, source) pairs.
+
+        Iterates over sources, applies a declination pre-filter and a full
+        great-circle distance check to identify pairs within ``angular_cutoff``,
+        then evaluates the convolved PDF for those pairs using ``pdf()``. On
+        repeated calls where the source and event positions are unchanged, pass
+        the result of a previous call as ``mask`` to skip the masking loop and
+        go straight to vectorized PDF evaluation.
+
+        Parameters
+        ----------
+        source_ras : ndarray, shape (n_sources,)
+            Source right ascensions in radians.
+        source_decs : ndarray, shape (n_sources,)
+            Source declinations in radians.
+        source_extensions : ndarray, shape (n_sources,)
+            Per-source angular extension radii in radians. Must be within the
+            range covered by ``points_extension`` provided at construction.
+        event_ras : ndarray, shape (n_events,)
+            Reconstructed event right ascensions in radians.
+        event_decs : ndarray, shape (n_events,)
+            Reconstructed event declinations in radians.
+        alpha : ndarray, shape (n_events,)
+            Per-event King alpha parameter in radians.
+        beta : ndarray, shape (n_events,)
+            Per-event King beta parameter.
+        mask : csr_array, optional
+            Sparse array whose nonzero structure encodes the valid
+            (event, source) pairs. When provided, the masking loop is skipped
+            and only the indexed pairs are evaluated. Pass the result of a
+            previous :meth:`evaluate` call to reuse the geometry.
+
+        Returns
+        -------
+        csr_array, shape (n_events, n_sources)
+            Sparse array of convolved PDF values in probability/steradian,
+            indexed ``[event_index, source_index]``.
+        """
+        source_ras = np.atleast_1d(np.asarray(source_ras, dtype=np.float64))
+        source_decs = np.atleast_1d(np.asarray(source_decs, dtype=np.float64))
+        source_extensions = np.atleast_1d(np.asarray(source_extensions, dtype=np.float64))
+        event_ras = np.asarray(event_ras, dtype=np.float64)
+        event_decs = np.asarray(event_decs, dtype=np.float64)
+        alpha = np.asarray(alpha, dtype=np.float64)
+        beta = np.asarray(beta, dtype=np.float64)
+
+        n_events = len(event_ras)
+        n_sources = len(source_ras)
+
+        if mask is not None:
+            rows, cols = mask.nonzero()
+            psi = angular_distance(
+                source_ras[cols],
+                source_decs[cols],
+                event_ras[rows],
+                event_decs[rows],
+            )
+            vals = self.pdf(psi, alpha[rows], beta[rows], source_extensions[cols])
+            nonzero = vals > 0.0
+            return csr_array(
+                (vals[nonzero], (rows[nonzero], cols[nonzero])),
+                shape=(n_events, n_sources),
+                dtype=np.float64,
+            )
+
+        row_chunks, col_chunks, val_chunks = [], [], []
+        for source_index, (src_ra, src_dec, src_ext) in enumerate(
+            zip(source_ras, source_decs, source_extensions)
+        ):
+            radius = min(
+                self.maximum_sigma * src_ext + self.angular_cutoff,
+                self._points_psi[-1],
+            )
+            dec_mask = np.abs(event_decs - src_dec) <= radius
+            candidate_indices = np.flatnonzero(dec_mask)
+            if len(candidate_indices) == 0:
+                continue
+
+            psi = angular_distance(
+                src_ra,
+                src_dec,
+                event_ras[candidate_indices],
+                event_decs[candidate_indices],
+            )
+            within_cutoff = psi <= radius
+            event_indices = candidate_indices[within_cutoff]
+            if len(event_indices) == 0:
+                continue
+
+            vals = self.pdf(
+                psi[within_cutoff],
+                alpha[event_indices],
+                beta[event_indices],
+                np.full(int(within_cutoff.sum()), src_ext),
+            )
+            nonzero = vals > 0.0
+            row_chunks.append(event_indices[nonzero])
+            col_chunks.append(np.full(int(nonzero.sum()), source_index, dtype=np.intp))
+            val_chunks.append(vals[nonzero])
+
+        if not row_chunks:
+            return csr_array((n_events, n_sources), dtype=np.float64)
+
+        return csr_array(
+            (
+                np.concatenate(val_chunks),
+                (np.concatenate(row_chunks), np.concatenate(col_chunks)),
+            ),
+            shape=(n_events, n_sources),
+            dtype=np.float64,
+        )
