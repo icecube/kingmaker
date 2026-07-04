@@ -117,6 +117,83 @@ class TestEvaluatePdfInterpolatedGamma:
         np.testing.assert_allclose(result, expected, rtol=1e-10)
 
 
+class TestMultipleSources:
+    """set_events/evaluate_pdf with more than one source position.
+
+    Regression coverage for the (event, source) broadcasting in
+    _pre_mask_and_distance: passing multiple sources used to raise
+    ValueError since events["ra"]/dec (n_events,) and source_ras/decs
+    (n_sources,) couldn't broadcast against each other.
+    """
+
+    def test_matches_direct_pdf_computation_per_source(self, likelihood):
+        rng = np.random.default_rng(6)
+        src_ras = np.array([0.0, np.radians(90.0)])
+        src_decs = np.array([0.0, np.radians(30.0)])
+
+        # One event cluster near each source; angular_cutoff=pi on the shared
+        # `likelihood` fixture means every event is in range of every source.
+        events_a = _make_events(10, rng)
+        events_b = _make_events(10, rng)
+        events_b["ra"] += src_ras[1]
+        events_b["dec"] += src_decs[1]
+        events = np.concatenate([events_a, events_b])
+
+        likelihood.set_events(events, source_ras=src_ras, source_decs=src_decs)
+        result = likelihood.evaluate_pdf(events, gamma=2.0)
+        assert result.shape == (len(events), len(src_ras))
+
+        bin_idx = np.array([_bin_index(a) for a in events["aux"]])
+        gamma_idx = int(np.searchsorted(SPECTRAL_INDICES, 2.0))
+        alpha = ALPHA_VALUES[gamma_idx][bin_idx]
+        beta = BETA_VALUES[gamma_idx][bin_idx]
+        king_pdf = KingPDF(angular_cutoff=likelihood.king_pdf.angular_cutoff)
+
+        dense = result.toarray()
+        for j, (src_ra, src_dec) in enumerate(zip(src_ras, src_decs)):
+            dist = angular_distance(src_ra, src_dec, events["ra"], events["dec"])
+            expected = king_pdf.pdf(dist, alpha, beta)
+            np.testing.assert_allclose(dense[:, j], expected, rtol=1e-10)
+
+    def test_sparse_structure_with_partial_and_overlapping_coverage(self, tmp_path):
+        """Events may fall within cutoff of zero, one, or both sources; each
+        (event, source) pair must be masked and evaluated independently."""
+        cutoff = np.radians(10.0)
+        likelihood = _make_likelihood(tmp_path, angular_cutoff=cutoff)
+
+        # Sources 8 deg apart; events at -8, +4, +16, +90 deg put one event
+        # in range of only source 0, one of both (overlap), one of only
+        # source 1, and one of neither.
+        dtype = [("ra", float), ("dec", float), ("aux", float)]
+        events = np.zeros(4, dtype=dtype)
+        events["aux"] = 0.5
+        events["dec"] = 0.0
+        events["ra"] = np.radians([-8.0, 4.0, 16.0, 90.0])
+
+        src_ras = np.array([0.0, np.radians(8.0)])
+        src_decs = np.array([0.0, 0.0])
+        likelihood.set_events(events, source_ras=src_ras, source_decs=src_decs)
+        dense = likelihood.evaluate_pdf(events, gamma=2.0).toarray()
+        assert dense.shape == (4, 2)
+
+        bin_idx = np.array([_bin_index(a) for a in events["aux"]])
+        gamma_idx = int(np.searchsorted(SPECTRAL_INDICES, 2.0))
+        alpha = ALPHA_VALUES[gamma_idx][bin_idx]
+        beta = BETA_VALUES[gamma_idx][bin_idx]
+        king_pdf = KingPDF(angular_cutoff=cutoff)
+
+        for j, (src_ra, src_dec) in enumerate(zip(src_ras, src_decs)):
+            dist = angular_distance(src_ra, src_dec, events["ra"], events["dec"])
+            expected = np.where(dist < cutoff, king_pdf.pdf(dist, alpha, beta), 0.0)
+            np.testing.assert_allclose(dense[:, j], expected, rtol=1e-10)
+
+        # Spelled out explicitly: source-0-only, both, source-1-only, neither.
+        assert dense[0, 0] > 0.0 and dense[0, 1] == 0.0
+        assert dense[1, 0] > 0.0 and dense[1, 1] > 0.0
+        assert dense[2, 0] == 0.0 and dense[2, 1] > 0.0
+        assert dense[3, 0] == 0.0 and dense[3, 1] == 0.0
+
+
 class TestGetAlphaBetaGammaExact:
     def test_exact_gamma_matches_direct_lookup(self, likelihood):
         rng = np.random.default_rng(2)
