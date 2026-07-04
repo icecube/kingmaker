@@ -285,9 +285,16 @@ class KingSpatialLikelihood:
         # (event, source) pair is mapped back to its position in those arrays.
         self.event_mask = np.zeros(len(events), dtype=bool)
         self.event_mask[event_rows] = True
-        masked_position = np.full(len(events), -1, dtype=np.intp)
+        masked_position = np.empty(len(events), dtype=np.intp)
         masked_position[self.event_mask] = np.arange(self.event_mask.sum())
         pair_position = masked_position[event_rows]
+
+        # event_rows/event_cols come out of _pre_mask_and_distance already in
+        # canonical CSR order (rows non-decreasing, columns increasing within a
+        # row), so we can set up the right structure for the pdf matrices'
+        # sparse array below now.
+        indptr = np.zeros(len(events) + 1, dtype=np.intp)
+        np.cumsum(np.bincount(event_rows, minlength=len(events)), out=indptr[1:])
 
         all_alpha, all_beta, all_norm = self._lookup_event_grid(events)
         self._pdf_matrices = []
@@ -303,7 +310,7 @@ class KingSpatialLikelihood:
             )
             self._pdf_matrices.append(
                 csr_array(
-                    (values, (event_rows, event_cols)),
+                    (values, event_cols, indptr),
                     shape=(len(events), n_sources),
                     dtype=np.float64,
                 )
@@ -505,9 +512,11 @@ class KingSpatialLikelihood:
         t = float(gamma - gamma_low) / float(gamma_high - gamma_low)
         lo = self._pdf_matrices[idx]
         hi = self._pdf_matrices[idx + 1]
-        result = lo.copy()
-        result.data[:] = (1.0 - t) * lo.data + t * hi.data
-        return result.tocsr()
+        # lo/hi share identical .indices/.indptr (built together in set_events), so
+        # the interpolated matrix can reuse them directly instead of paying for
+        # lo.copy()'s full deep copy just to overwrite its .data right after.
+        data = (1.0 - t) * lo.data + t * hi.data
+        return csr_array((data, lo.indices, lo.indptr), shape=lo.shape, copy=False)
 
     def evaluate_marginalized_pdf(self, events: npt.NDArray[Any], gamma: float = 2) -> csr_array:
         """
@@ -570,9 +579,10 @@ class KingSpatialLikelihood:
 
         lo = self._marg_matrices[idx]
         hi = self._marg_matrices[idx + 1]
-        result = lo.copy()
-        result.data[:] = (1.0 - t) * lo.data + t * hi.data
-        return result.tocsr()
+        # lo/hi share identical .indices/.indptr by construction (see set_events),
+        # so reuse them directly instead of lo.copy()'s full deep copy.
+        data = (1.0 - t) * lo.data + t * hi.data
+        return csr_array((data, lo.indices, lo.indptr), shape=lo.shape, copy=False)
 
 
 # class KingTemplateLikelihood:
