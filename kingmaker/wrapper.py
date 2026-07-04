@@ -9,7 +9,7 @@ from scipy.sparse import csr_array
 
 from .pdf import KingPDF, MarginalizedKingPDF
 from .fitting import KingPSFFitter
-from .utils import angular_distance, _pre_mask_and_distance, _interp1d
+from .utils import _pre_mask_and_distance, _interp1d
 
 
 class KingSpatialLikelihood:
@@ -271,26 +271,24 @@ class KingSpatialLikelihood:
             )
             self.multiple_source_warning_logged = True
 
-        # Calculate angular distances and build event_mask. For the common
-        # single-source case with a sub-pi cutoff, a single compiled numba pass
-        # does the rectangular (dec, RA) pre-filter and the haversine together,
-        # reading each event's ra/dec only once.
+        # Calculate the (event, source) angular distances via a single compiled
+        # pass that pre-filters on a dec/RA bounding box before the haversine,
+        # returning only the (event, source) pairs within the cutoff.
         cutoff = self.king_pdf.angular_cutoff
-        if len(source_ras) == 1 and cutoff < np.pi:
-            src_ra = float(source_ras[0])
-            src_dec = float(source_decs[0])
-            ra_span = min(cutoff / max(abs(np.cos(src_dec)), np.sin(cutoff)), np.pi)
-            dists_all = _pre_mask_and_distance(
-                events["ra"], events["dec"], src_ra, src_dec, cutoff, ra_span
-            )
-            self.event_mask = dists_all >= 0
-            self.event_distances = dists_all[self.event_mask]
-        else:
-            all_dists = angular_distance(events["ra"], events["dec"], source_ras, source_decs)
-            self.event_mask = all_dists < cutoff
-            self.event_distances = all_dists[self.event_mask]
+        n_sources = len(source_ras)
+        event_rows, event_cols, self.event_distances = _pre_mask_and_distance(
+            events["ra"], events["dec"], source_ras, source_decs, cutoff
+        )
 
-        event_rows = np.where(self.event_mask)[0]
+        # alpha/beta/norm are looked up once per event (they don't depend on
+        # source), so event_mask is the per-event OR across sources, and each
+        # (event, source) pair is mapped back to its position in those arrays.
+        self.event_mask = np.zeros(len(events), dtype=bool)
+        self.event_mask[event_rows] = True
+        masked_position = np.full(len(events), -1, dtype=np.intp)
+        masked_position[self.event_mask] = np.arange(self.event_mask.sum())
+        pair_position = masked_position[event_rows]
+
         all_alpha, all_beta, all_norm = self._lookup_event_grid(events)
         self._pdf_matrices = []
         for i in range(len(self.spectral_indices)):
@@ -298,12 +296,15 @@ class KingSpatialLikelihood:
             # alpha/beta come from the fitted grid (validated at fit time) and
             # event_distances are already within angular_cutoff by construction.
             values = self.king_pdf.pdf_from_norm(
-                self.event_distances, all_alpha[i], all_beta[i], all_norm[i]
+                self.event_distances,
+                all_alpha[i][pair_position],
+                all_beta[i][pair_position],
+                all_norm[i][pair_position],
             )
             self._pdf_matrices.append(
                 csr_array(
-                    (values, (event_rows, np.zeros(len(event_rows), dtype=np.intp))),
-                    shape=(len(events), 1),
+                    (values, (event_rows, event_cols)),
+                    shape=(len(events), n_sources),
                     dtype=np.float64,
                 )
             )
@@ -476,10 +477,10 @@ class KingSpatialLikelihood:
 
         Returns
         -------
-        csr_array, shape (n_events, 1)
+        csr_array, shape (n_events, n_sources)
             Sparse PDF matrix. Nonzero entries hold the King PDF value
-            (probability/steradian) for each event within the angular cutoff;
-            events outside the cutoff are implicitly zero.
+            (probability/steradian) for each (event, source) pair within the
+            angular cutoff; pairs outside the cutoff are implicitly zero.
 
         Raises
         ------

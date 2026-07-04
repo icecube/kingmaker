@@ -66,43 +66,122 @@ def angular_distance(
 
 
 @njit(cache=True)
-def _pre_mask_and_distance(
-    ra: npt.NDArray[np.floating],
-    dec: npt.NDArray[np.floating],
+def _premask_events(
+    ra_i: float,
+    dec_i: float,
     src_ra: float,
     src_dec: float,
     cutoff: float,
     ra_span: float,
-) -> npt.NDArray[np.floating]:
-    """Single-pass rectangular pre-filter and haversine for the single-source case.
+) -> bool:
+    """Cheap dec/RA bounding-box test for one event against one source.
 
-    Combines the dec/RA bounding-box rejection and the exact angular distance
-    into one loop over events, reading each record's ra/dec once from the same
-    cache line. The haversine is evaluated only for events that survive both
-    pre-checks (~0.6% at 10°, ~0.15% at 5°).
-
-    Returns an array of length len(ra) where element i holds the angular
-    distance to the source when event i is within `cutoff`, and -1.0 otherwise.
+    A necessary but not sufficient condition for the event to be within
+    `cutoff` of the source: it only rejects events outside a rectangular
+    (dec, RA) box, so callers still need the exact haversine distance for
+    events that pass. `ra_span` is the source's precomputed max RA offset
+    at `cutoff`, from `min(cutoff / max(cos(src_dec), sin(cutoff)), pi)`.
     """
-    n = len(ra)
-    dists = np.full(n, -1.0)
+    if abs(dec_i - src_dec) >= cutoff:
+        return False
+    ra_diff = abs(ra_i - src_ra)
+    if ra_diff > np.pi:
+        ra_diff = 2 * np.pi - ra_diff
+    return ra_diff < ra_span
+
+
+@njit(cache=True)
+def _pre_mask_and_distance(
+    ra: npt.NDArray[np.floating],
+    dec: npt.NDArray[np.floating],
+    src_ra: npt.NDArray[np.floating],
+    src_dec: npt.NDArray[np.floating],
+    cutoff: float,
+) -> Tuple[npt.NDArray[np.intp], npt.NDArray[np.intp], npt.NDArray[np.float64]]:
+    """Rectangular pre-filter and haversine for one or more sources, returned ready
+    for input into a sparse array.
+
+    For every source, `_premask_events` rejects events outside a dec/RA
+    bounding box using cheap comparisons before the full angular
+    distance is evaluated, reading each event's ra/dec once and testing it
+    against every source. Only (event, source) pairs within `cutoff` are returned (~0.6% at
+    10°, ~0.15% at 5°, per source). This uses two passes over all (event,
+    source) pairs: the first counts pairs surviving `_premask_events` so the
+    output arrays can be allocated at their exact size, and the second
+    evaluates the haversine only for those candidates, writing directly into
+    the preallocated arrays. This keeps both the output size and the number
+    of haversine evaluations proportional to the number of surviving pairs
+    rather than to n_events * n_sources.
+
+    Parameters
+    ----------
+    ra : ndarray, shape (n_events,)
+        Event right ascension in radians.
+    dec : ndarray, shape (n_events,)
+        Event declination in radians.
+    src_ra : ndarray, shape (n_sources,)
+        Source right ascension in radians.
+    src_dec : ndarray, shape (n_sources,)
+        Source declination in radians.
+    cutoff : float
+        Maximum angular separation in radians.
+
+    Returns
+    -------
+    event_rows : ndarray of intp
+        Event index for each (event, source) pair within `cutoff`.
+    event_cols : ndarray of intp
+        Source index for each (event, source) pair within `cutoff`.
+    distances : ndarray of float64
+        Angular distance for each pair, aligned with event_rows/event_cols.
+    """
+    n_events = len(ra)
+    n_src = len(src_ra)
+
     cos_src_dec = np.cos(src_dec)
     sin_src_dec = np.sin(src_dec)
-    for i in prange(n):
-        if abs(dec[i] - src_dec) >= cutoff:
-            continue
-        ra_diff = abs(ra[i] - src_ra)
-        if ra_diff > np.pi:
-            ra_diff = 2 * np.pi - ra_diff
-        if ra_diff >= ra_span:
-            continue
-        cos_dist = np.cos(ra[i] - src_ra) * cos_src_dec * np.cos(dec[i]) + sin_src_dec * np.sin(
-            dec[i]
-        )
-        d = np.arccos(min(max(cos_dist, -1), 1))
-        if d < cutoff:
-            dists[i] = d
-    return dists
+    ra_span = np.empty(n_src)
+    for j in range(n_src):
+        ra_span[j] = min(cutoff / max(abs(cos_src_dec[j]), np.sin(cutoff)), np.pi)
+
+    # First pass: count event-source pairs surviving the cheap box filter, so the
+    # output arrays below can be allocated at exactly that size. This count is an
+    # exact upper bound on the final number of pairs, not an approximation -- the
+    # box filter is a superset of the exact cutoff, so the second pass below still
+    # discards any pairs whose haversine distance lands outside the cutoff.
+    n_candidates = 0
+    for i in range(n_events):
+        ra_i = ra[i]
+        dec_i = dec[i]
+        for j in range(n_src):
+            if _premask_events(ra_i, dec_i, src_ra[j], src_dec[j], cutoff, ra_span[j]):
+                n_candidates += 1
+
+    event_rows = np.empty(n_candidates, dtype=np.intp)
+    event_cols = np.empty(n_candidates, dtype=np.intp)
+    distances = np.empty(n_candidates, dtype=np.float64)
+    count = 0
+
+    # A second pass. This time, we have the correct sized output arrays, so we can
+    # filter events for each source, compute the angular distances, and write them
+    # to the output arrays.
+    for i in range(n_events):
+        ra_i = ra[i]
+        dec_i = dec[i]
+        for j in range(n_src):
+            if not _premask_events(ra_i, dec_i, src_ra[j], src_dec[j], cutoff, ra_span[j]):
+                continue
+            cos_dist = np.cos(ra_i - src_ra[j]) * cos_src_dec[j] * np.cos(dec_i) + sin_src_dec[
+                j
+            ] * np.sin(dec_i)
+            d = np.arccos(min(max(cos_dist, -1.0), 1.0))
+            if d < cutoff:
+                event_rows[count] = i
+                event_cols[count] = j
+                distances[count] = d
+                count += 1
+
+    return event_rows[:count], event_cols[:count], distances[:count]
 
 
 @njit(cache=True)
