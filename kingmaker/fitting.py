@@ -156,7 +156,10 @@ class KingPSFFitter:
             If required fields are missing.
         """
         required_fields = ["ra", "dec", self.true_ra_name, self.true_dec_name]
-        names = self.signal_events.dtype.names or ()
+        if hasattr(self.signal_events, "dtype"):
+            names = self.signal_events.dtype.names or ()
+        else:
+            names = self.signal_events.keys()
         missing_required = [f for f in required_fields if f not in names]
         if missing_required:
             raise ValueError(f"Signal events missing required fields: {missing_required}")
