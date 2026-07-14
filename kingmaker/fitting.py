@@ -453,22 +453,17 @@ class KingPSFFitter:
 
         # Get initial guess from peak location.
         alpha_guess = bin_centers[np.searchsorted(cdf_hist, 0.5)]
-        best_params = None
-        best_chi2 = np.inf
-        for beta in [1.25, 1.75, 2, 2.5, 4, 7, 9]:
-            result = minimize(
-                lambda params: self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, *params),
-                [alpha_guess, beta],
-                method="L-BFGS-B",
-                jac=True,
-                bounds=[
-                    (np.nextafter(1e-4, np.pi), np.nextafter(self.angular_cutoff, 0)),
-                    (np.nextafter(1, 2), np.nextafter(1000, 1)),
-                ],
-            )
-
-            if result.success and (best_chi2 > result.fun):
-                best_params, best_chi2 = result.x, result.fun
+        beta_guess = 2
+        result = minimize(
+            lambda params: self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, *params),
+            [alpha_guess, beta_guess],
+            method="L-BFGS-B",
+            jac=True,
+            bounds=[
+                (np.nextafter(1e-4, np.pi), np.nextafter(self.angular_cutoff, 0)),
+                (1.01, 1000),
+            ],
+        )
 
         # Store histogram data (pad/truncate to match storage size).
         # Make sure to rescale by the phase space to get densities.
@@ -478,10 +473,10 @@ class KingPSFFitter:
         self.dpsi_bins[param_idx][: len(dpsi_bins)] = dpsi_bins
 
         # Store results if we found a solution
-        if best_params is not None:
-            self.fit_alpha[param_idx] = best_params[0]
-            self.fit_beta[param_idx] = best_params[1]
-            self.fit_quality[param_idx] = best_chi2
+        if result.success:
+            self.fit_alpha[param_idx] = result.x[0]
+            self.fit_beta[param_idx] = result.x[1]
+            self.fit_quality[param_idx] = result.fun
             return True
 
         return False
