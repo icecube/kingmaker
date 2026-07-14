@@ -465,6 +465,27 @@ class KingPSFFitter:
             ],
         )
 
+        # If the fit doesn't succeed, try manually seeding with other beta values.
+        if not result.success:
+            best = None
+            for beta in [1.25, 1.75, 2, 2.5, 4, 7, 9]:
+                result = minimize(
+                    lambda params: self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, *params),
+                    [alpha_guess, beta],
+                    method="L-BFGS-B",
+                    jac=True,
+                    bounds=[
+                        (np.nextafter(1e-4, np.pi), np.nextafter(self.angular_cutoff, 0)),
+                        (1.01, 1000),
+                    ],
+                )
+
+                if result.success:
+                    if (best is None) or (best.fun > result.fun):
+                        best = result
+
+            result = best
+
         # Store histogram data (pad/truncate to match storage size).
         # Make sure to rescale by the phase space to get densities.
         n_store = min(len(hist), self.dpsi_nbins)
