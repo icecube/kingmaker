@@ -31,6 +31,44 @@ def _interp1d(x: float, xlow: float, xhigh: float, ylow: float, yhigh: float) ->
     """
     return ylow + (yhigh - ylow) / (xhigh - xlow) * (x - xlow)
 
+@njit(cache=True)
+def _interp1d_order2(x: float,
+                     xlow: float, xnearest: float, xhigh: float,
+                     ylow: float, ynearest: float, yhigh: float) -> float:
+    """
+    Perform 1D order-2 interpolation.
+
+    Parameters
+    ----------
+    x : float
+        Point at which to interpolate.
+    xlow : float
+        Lower x-coordinate of the interval.
+    xnearest : float
+        Nearest x-coordinate of the interval
+    xhigh : float
+        Upper x-coordinate of the interval.
+    ylow : float
+        Function value at xlow.
+    ynearest : float
+        Function value at xnearest.
+    yhigh : float
+        Function value at xhigh.
+
+    Returns
+    -------
+    float
+        Order-2 interpolated value at x.
+    """
+    # np.linalg.solve solves Ax = B. We'll use that
+    # to get the coefficients in y = a x**2 + b * x + c.
+    A = np.array([[xlow**2, xnearest**2, xhigh**2],
+                  [xlow,    xnearest,    xhigh],
+                  [1,       1,           1]])
+    B = np.array([ylow, ynearest, yhigh])
+    coeffs = np.linalg.solve(A, B)
+
+    return np.dot(coeffs, np.array([x**2, x, 1]))
 
 @njit(cache=True)
 def angular_distance(
