@@ -451,9 +451,20 @@ class KingPSFFitter:
         cdf_hist = np.cumsum(hist)
         cdf_variance = np.cumsum(hist2) / np.sum(hist) ** 2
 
-        # Get initial guess from peak location.
-        alpha_guess = bin_centers[np.searchsorted(cdf_hist, 0.5)]
-        beta_guess = 2
+        # Get initial guess by doing a rough scan over alpha and beta.
+        alpha_median_guess = bin_centers[np.searchsorted(cdf_hist, 0.5)]
+        alpha_candidates = np.clip(
+            alpha_median_guess * np.array([0.5, 0.75, 1.0, 1.5, 2.0]),
+            np.nextafter(1e-4, np.pi),
+            np.nextafter(self.angular_cutoff, 0),
+        )
+        beta_candidates = [1.25, 1.75, 2, 2.5, 4, 7, 9]
+        best_prescan, alpha_guess, beta_guess = None, alpha_median_guess, 2
+        for alpha in alpha_candidates:
+            for beta in beta_candidates:
+                val = self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, alpha, beta)[0]
+                if best_prescan is None or val < best_prescan:
+                    best_prescan, alpha_guess, beta_guess = val, alpha, beta
         result = minimize(
             lambda params: self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, *params),
             [alpha_guess, beta_guess],
@@ -468,7 +479,7 @@ class KingPSFFitter:
         # If the fit doesn't succeed, try manually seeding with other beta values.
         if not result.success:
             best = None
-            for beta in [1.25, 1.75, 2, 2.5, 4, 7, 9]:
+            for beta in beta_candidates:
                 result = minimize(
                     lambda params: self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, *params),
                     [alpha_guess, beta],
