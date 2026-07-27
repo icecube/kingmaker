@@ -42,6 +42,7 @@ class KingSpatialLikelihood:
     # Source-level information
     source_ras: Optional[npt.NDArray[Any]] = None
     source_decs: Optional[npt.NDArray[Any]] = None
+    source_extensions: Optional[npt.NDArray[Any]] = None
 
     # Have some place to cache the per-event information so we don't need to
     # recalculate it every time we evaluate the PDF.
@@ -81,6 +82,7 @@ class KingSpatialLikelihood:
         marginalization_points_beta: Optional[npt.NDArray[np.floating]] = None,
         marginalization_n_signed_delta_dec: int = 200,
         marginalization_n_ra_bins: int = 100,
+        extension_grid: Optional[npt.NDArray[np.floating]] = None,
     ):
         # Store some of the configuration parameters for this instance.
         # Note that we don't need to store the signal events, dpsi_nbins,
@@ -117,6 +119,7 @@ class KingSpatialLikelihood:
                 true_ra_name=true_ra_name,
                 true_dec_name=true_dec_name,
                 true_energy_name=true_energy_name,
+                extension_grid=extension_grid,
             )
             fitted_parameters = fitter.fit_all_bins(verbose=True)
             if cache_parameters and (cache_name is not None):
@@ -136,9 +139,20 @@ class KingSpatialLikelihood:
             self.keys.append(key)
             self.bin_centers.append((edges[:-1] + edges[1:]) / 2)
 
-        # And grab the fitted alpha/beta arrays
+        # Extension grid (bin-center-style values, nearest-snapped per source).
+        if "extension_grid" not in fitted_parameters:
+            raise ValueError(f"Cache {cache_name!r} has no extension_grid. Delete it and refit.")
+        self.extension_grid = np.sort(np.atleast_1d(fitted_parameters["extension_grid"]))
+
+        # And grab the fitted alpha/beta arrays, shape (n_extension, n_gamma, *bins).
         self.alpha_values = fitted_parameters["alpha"]
         self.beta_values = fitted_parameters["beta"]
+        expected_ndim = 2 + len(self.parametrization_bins)
+        if self.alpha_values.ndim != expected_ndim or self.beta_values.ndim != expected_ndim:
+            raise ValueError(
+                f"Cached alpha/beta have {self.alpha_values.ndim} dimensions, expected "
+                f"{expected_ndim} (extension, gamma, *bins). Delete {cache_name!r} and refit."
+            )
 
         # Instantiate the PDF object.
         self.king_pdf = KingPDF(angular_cutoff=angular_cutoff)
@@ -188,7 +202,12 @@ class KingSpatialLikelihood:
         result &= np.array_equal(self.events["dec"][::10], events["dec"][::10])
         return result
 
-    def _sources_match(self, source_ras: npt.NDArray[Any], source_decs: npt.NDArray[Any]) -> bool:
+    def _sources_match(
+        self,
+        source_ras: npt.NDArray[Any],
+        source_decs: npt.NDArray[Any],
+        source_extensions: Optional[npt.NDArray[Any]] = None,
+    ) -> bool:
         if self.source_ras is None:
             return False
         if self.source_decs is None:
@@ -201,6 +220,10 @@ class KingSpatialLikelihood:
             return False
         if len(self.source_decs) != len(source_decs):
             return False
+        if source_extensions is not None and not np.array_equal(
+            self.source_extensions, source_extensions
+        ):
+            return False
         return np.array_equal(self.source_ras, source_ras) and np.array_equal(
             self.source_decs, source_decs
         )
@@ -210,6 +233,7 @@ class KingSpatialLikelihood:
         events: npt.NDArray[Any],
         source_ras: Optional[npt.NDArray[np.floating]],
         source_decs: Optional[npt.NDArray[np.floating]],
+        source_extensions: Optional[npt.NDArray[np.floating]] = None,
     ) -> None:
         """
         Cache per-event King PDF values for each spectral index ahead of a call
@@ -220,8 +244,9 @@ class KingSpatialLikelihood:
         computed, and the King PDF is evaluated and cached for every spectral
         index in ``spectral_indices``. This must be called before
         :meth:`evaluate_pdf`. Calling it again with the same ``events``,
-        ``source_ras``, and ``source_decs`` as the previous call is a cheap
-        no-op, so it is safe to call once per trial without checking first.
+        ``source_ras``, ``source_decs``, and ``source_extensions`` as the
+        previous call is a cheap no-op, so it is safe to call once per trial
+        without checking first.
 
         Parameters
         ----------
@@ -234,6 +259,10 @@ class KingSpatialLikelihood:
         source_decs : ndarray
             Source declination(s) in radians. Must have the same length as
             ``source_ras``.
+        source_extensions : ndarray, optional
+            Source extension radii in radians, nearest-snapped to the fitted
+            ``extension_grid``. Defaults to zero (point source) for every
+            source.
 
         Raises
         ------
@@ -246,7 +275,9 @@ class KingSpatialLikelihood:
         Support for multiple simultaneous sources is experimental and logs a
         one-time warning; results should be checked carefully in that case.
         """
-        if self._events_match(events) and self._sources_match(source_ras, source_decs):
+        if self._events_match(events) and self._sources_match(
+            source_ras, source_decs, source_extensions
+        ):
             return
 
         self.events = events
@@ -271,6 +302,17 @@ class KingSpatialLikelihood:
             )
             self.multiple_source_warning_logged = True
 
+        self.source_extensions = (
+            np.zeros(len(source_ras))
+            if source_extensions is None
+            else np.asarray(source_extensions, dtype=np.float64)
+        )
+        if len(self.source_extensions) != len(source_ras):
+            raise ValueError(
+                "source_extensions must have the same length as source_ras and source_decs."
+            )
+        ext_idx_per_source = self._nearest_extension_index(self.source_extensions)
+
         # Calculate the (event, source) angular distances via a single compiled
         # pass that pre-filters on a dec/RA bounding box before the haversine,
         # returning only the (event, source) pairs within the cutoff.
@@ -279,6 +321,7 @@ class KingSpatialLikelihood:
         event_rows, event_cols, self.event_distances = _pre_mask_and_distance(
             events["ra"], events["dec"], source_ras, source_decs, cutoff
         )
+        ext_idx_pairs = ext_idx_per_source[event_cols]
 
         # alpha/beta/norm are looked up once per event (they don't depend on
         # source), so event_mask is the per-event OR across sources, and each
@@ -304,9 +347,9 @@ class KingSpatialLikelihood:
             # event_distances are already within angular_cutoff by construction.
             values = self.king_pdf.pdf_from_norm(
                 self.event_distances,
-                all_alpha[i][pair_position],
-                all_beta[i][pair_position],
-                all_norm[i][pair_position],
+                all_alpha[ext_idx_pairs, i, pair_position],
+                all_beta[ext_idx_pairs, i, pair_position],
+                all_norm[ext_idx_pairs, i, pair_position],
             )
             self._pdf_matrices.append(
                 csr_array(
@@ -316,39 +359,66 @@ class KingSpatialLikelihood:
                 )
             )
 
-        # Marginalized path: precompute one sparse (n_events, n_sources) matrix per
-        # spectral index. The first call establishes the sparsity structure; all
-        # subsequent calls pass that result as mask= so interpn operates on the same
-        # fixed (event, source) pairs. The mask path in MarginalizedKingPDF.evaluate()
-        # does not filter values > 0, so every matrix in _marg_matrices is guaranteed to
-        # share identical .indices and .indptr — a requirement for the scalar lerp
-        # on .data in evaluate_marginalized_pdf.
+        # Marginalized path: marg_source_decs is assumed to correspond 1:1 with
+        # source_ras/source_decs/source_extensions.
         if self.mkpdf is not None:
-            all_alpha_full, all_beta_full = self._lookup_all_events_grid(events)
-            self._marg_matrices = []
-            mask_marg: Optional[csr_array] = None
-            for i in range(len(self.spectral_indices)):
-                mat = self.mkpdf.evaluate(
-                    self._marg_source_decs,
-                    events["dec"],
-                    all_alpha_full[i],
-                    all_beta_full[i],
-                    mask=mask_marg,
+            if len(self._marg_source_decs) != len(source_ras):
+                raise ValueError(
+                    "marginalization_source_decs must have the same length as "
+                    "source_ras/source_decs/source_extensions passed to set_events."
                 )
-                if mask_marg is None:
-                    mask_marg = mat
-                self._marg_matrices.append(mat)
+            all_alpha_full, all_beta_full = self._lookup_all_events_grid(events)
+
+            unique_ext = np.unique(ext_idx_per_source)
+            group_source_idx = [np.flatnonzero(ext_idx_per_source == e) for e in unique_ext]
+            group_masks: List[Optional[csr_array]] = [None] * len(unique_ext)
+
+            self._marg_matrices = []
+            for i in range(len(self.spectral_indices)):
+                data_parts, row_parts, col_parts = [], [], []
+                for g, (ext_idx, source_idx) in enumerate(zip(unique_ext, group_source_idx)):
+                    mat = self.mkpdf.evaluate(
+                        self._marg_source_decs[source_idx],
+                        events["dec"],
+                        all_alpha_full[ext_idx, i],
+                        all_beta_full[ext_idx, i],
+                        mask=group_masks[g],
+                    )
+                    if group_masks[g] is None:
+                        group_masks[g] = mat
+                    coo = mat.tocoo()
+                    data_parts.append(coo.data)
+                    row_parts.append(coo.row)
+                    col_parts.append(source_idx[coo.col])
+                self._marg_matrices.append(
+                    csr_array(
+                        (
+                            np.concatenate(data_parts),
+                            (np.concatenate(row_parts), np.concatenate(col_parts)),
+                        ),
+                        shape=(len(events), len(self._marg_source_decs)),
+                        dtype=np.float64,
+                    )
+                )
         return
+
+    def _nearest_extension_index(self, source_extensions):
+        """Nearest-bin lookup of extension_grid index for each source."""
+        centers = self.extension_grid
+        if len(centers) == 1:
+            return np.zeros(len(source_extensions), dtype=np.intp)
+        i = np.searchsorted(centers, source_extensions).clip(1, len(centers) - 1)
+        return np.where(source_extensions - centers[i - 1] < centers[i] - source_extensions, i - 1, i)
 
     def _lookup_event_grid(self, events):
         """
-        Nearest-bin lookup of alpha, beta, and norm for each (unmasked) event.
+        Nearest-bin lookup of alpha, beta, and norm for each (unmasked) event,
+        for every extension in extension_grid.
 
         Shared by :meth:`get_alpha_beta` and :meth:`set_events` so the
         nearest-bin index computation is only ever done once per call.
         """
 
-        # Nearest-bin lookup. Extracts each field individually after masking.
         def index(centers, values):
             i = np.searchsorted(centers, values).clip(1, len(centers) - 1)
             return np.where(values - centers[i - 1] < centers[i] - values, i - 1, i)
@@ -358,13 +428,13 @@ class KingSpatialLikelihood:
             for i, key in enumerate(self.keys)
         )
 
-        idx = (slice(None), *event_indices)
+        idx = (slice(None), slice(None), *event_indices)
         return self.alpha_values[idx], self.beta_values[idx], self.norm_values[idx]
 
     def _lookup_all_events_grid(self, events):
         """
         Nearest-bin lookup of alpha and beta for every event, without applying
-        ``event_mask``.
+        ``event_mask``, for every extension in extension_grid.
 
         Used by :meth:`set_events` to supply per-event PSF parameters for
         :meth:`MarginalizedKingPDF.evaluate`, which performs its own angular
@@ -372,8 +442,8 @@ class KingSpatialLikelihood:
 
         Returns
         -------
-        alpha : ndarray, shape (n_gamma, n_events)
-        beta  : ndarray, shape (n_gamma, n_events)
+        alpha : ndarray, shape (n_extension, n_gamma, n_events)
+        beta  : ndarray, shape (n_extension, n_gamma, n_events)
         """
 
         def index(centers, values):
@@ -383,10 +453,10 @@ class KingSpatialLikelihood:
         event_indices = tuple(
             index(self.bin_centers[i], events[key]) for i, key in enumerate(self.keys)
         )
-        idx = (slice(None), *event_indices)
+        idx = (slice(None), slice(None), *event_indices)
         return self.alpha_values[idx], self.beta_values[idx]
 
-    def get_alpha_beta(self, events):
+    def get_alpha_beta(self, events, extension_index: int = 0):
         """
         Look up fitted alpha/beta parameters for each event via nearest-bin lookup.
 
@@ -399,6 +469,8 @@ class KingSpatialLikelihood:
             Events to look up. Must contain the fields referenced by
             ``parametrization_bins``. Only events selected by the mask set in
             the most recent :meth:`set_events` call are returned.
+        extension_index : int, optional
+            Index into ``extension_grid``. Default is 0.
         Returns
         -------
         alpha : ndarray, shape (n_gamma, n_masked_events)
@@ -407,7 +479,7 @@ class KingSpatialLikelihood:
             Fitted beta values for each spectral index and event.
         """
         alpha, beta, _ = self._lookup_event_grid(events)
-        return alpha, beta
+        return alpha[extension_index], beta[extension_index]
 
     def get_alpha_beta_gamma(self, gamma, events=None, alpha=None, beta=None):
         """

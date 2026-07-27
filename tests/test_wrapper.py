@@ -18,18 +18,24 @@ from kingmaker.wrapper import KingSpatialLikelihood
 
 SPECTRAL_INDICES = np.array([1.0, 2.0, 3.0])
 BIN_EDGES = np.array([0.0, 1.0, 2.0, 3.0])  # bin centers: 0.5, 1.5, 2.5
+EXTENSION_GRID = np.array([0.0])  # single point-source extension
+# shape (n_extension=1, n_gamma=3, n_bins=3)
 ALPHA_VALUES = np.array(
     [
-        [np.radians(0.5), np.radians(1.0), np.radians(1.5)],
-        [np.radians(0.6), np.radians(1.1), np.radians(1.6)],
-        [np.radians(0.7), np.radians(1.2), np.radians(1.7)],
+        [
+            [np.radians(0.5), np.radians(1.0), np.radians(1.5)],
+            [np.radians(0.6), np.radians(1.1), np.radians(1.6)],
+            [np.radians(0.7), np.radians(1.2), np.radians(1.7)],
+        ]
     ]
 )
 BETA_VALUES = np.array(
     [
-        [2.0, 2.5, 3.0],
-        [2.1, 2.6, 3.1],
-        [2.2, 2.7, 3.2],
+        [
+            [2.0, 2.5, 3.0],
+            [2.1, 2.6, 3.1],
+            [2.2, 2.7, 3.2],
+        ]
     ]
 )
 
@@ -41,6 +47,7 @@ def _make_likelihood(tmp_path, angular_cutoff=np.pi):
         parametrization_bins=np.array({"aux": BIN_EDGES}, dtype=object),
         alpha=ALPHA_VALUES,
         beta=BETA_VALUES,
+        extension_grid=EXTENSION_GRID,
     )
     return KingSpatialLikelihood(
         signal_events=np.empty(0),
@@ -95,8 +102,8 @@ class TestEvaluatePdfExactGamma:
         for gamma_idx, gamma in enumerate(SPECTRAL_INDICES):
             result = likelihood.evaluate_pdf(events, gamma=gamma).toarray().ravel()
 
-            alpha = ALPHA_VALUES[gamma_idx][bin_idx]
-            beta = BETA_VALUES[gamma_idx][bin_idx]
+            alpha = ALPHA_VALUES[0][gamma_idx][bin_idx]
+            beta = BETA_VALUES[0][gamma_idx][bin_idx]
             expected = king_pdf.pdf(dist, alpha, beta)
 
             np.testing.assert_allclose(result, expected, rtol=1e-10)
@@ -145,8 +152,8 @@ class TestMultipleSources:
 
         bin_idx = np.array([_bin_index(a) for a in events["aux"]])
         gamma_idx = int(np.searchsorted(SPECTRAL_INDICES, 2.0))
-        alpha = ALPHA_VALUES[gamma_idx][bin_idx]
-        beta = BETA_VALUES[gamma_idx][bin_idx]
+        alpha = ALPHA_VALUES[0][gamma_idx][bin_idx]
+        beta = BETA_VALUES[0][gamma_idx][bin_idx]
         king_pdf = KingPDF(angular_cutoff=likelihood.king_pdf.angular_cutoff)
 
         dense = result.toarray()
@@ -178,8 +185,8 @@ class TestMultipleSources:
 
         bin_idx = np.array([_bin_index(a) for a in events["aux"]])
         gamma_idx = int(np.searchsorted(SPECTRAL_INDICES, 2.0))
-        alpha = ALPHA_VALUES[gamma_idx][bin_idx]
-        beta = BETA_VALUES[gamma_idx][bin_idx]
+        alpha = ALPHA_VALUES[0][gamma_idx][bin_idx]
+        beta = BETA_VALUES[0][gamma_idx][bin_idx]
         king_pdf = KingPDF(angular_cutoff=cutoff)
 
         for j, (src_ra, src_dec) in enumerate(zip(src_ras, src_decs)):

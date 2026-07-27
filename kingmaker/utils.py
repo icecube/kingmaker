@@ -1,4 +1,4 @@
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 import numpy as np
 import numpy.typing as npt
 from numba import njit, prange
@@ -101,6 +101,51 @@ def angular_distance(
     """
     cosDist = np.cos(src_ra - ra) * np.cos(src_dec) * np.cos(dec) + np.sin(src_dec) * np.sin(dec)
     return np.arccos(np.minimum(np.maximum(cosDist, -1.0), 1.0))  # type: ignore[no-any-return]
+
+
+def sample_with_extension(
+    true_ra: Union[float, npt.NDArray[np.floating]],
+    true_dec: Union[float, npt.NDArray[np.floating]],
+    extension: Union[float, npt.NDArray[np.floating]],
+    rng: Optional[np.random.Generator] = None,
+) -> Tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+    """
+    Sample a position offset from (true_ra, true_dec) by a Rayleigh(extension)
+    magnitude at a uniformly random bearing, simulating a source's angular extent.
+
+    Parameters
+    ----------
+    true_ra, true_dec : float or ndarray
+        True source position(s) in radians.
+    extension : float or ndarray
+        Rayleigh scale of the angular offset, in radians.
+    rng : np.random.Generator, optional
+        Random number generator. If None, uses np.random.default_rng().
+
+    Returns
+    -------
+    ra, dec : ndarray
+        Sampled positions in radians.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    true_ra, true_dec, extension = np.broadcast_arrays(true_ra, true_dec, extension)
+    d = rng.rayleigh(extension)
+    theta = rng.uniform(0, 2 * np.pi, size=np.shape(d))
+
+    sin_dec = np.sin(true_dec)
+    cos_dec = np.cos(true_dec)
+    sin_d = np.sin(d)
+    cos_d = np.cos(d)
+
+    sin_dec2 = np.clip(sin_dec * cos_d + cos_dec * sin_d * np.cos(theta), -1.0, 1.0)
+    dec = np.arcsin(sin_dec2)
+    ra = np.mod(
+        true_ra + np.arctan2(np.sin(theta) * sin_d * cos_dec, cos_d - sin_dec * sin_dec2),
+        2 * np.pi,
+    )
+    return ra, dec
 
 
 @njit(cache=True)

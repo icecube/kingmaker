@@ -81,11 +81,11 @@ class TestKingPSFFitterStructure:
         assert fitter.bin_names == ["aux"]
 
     def test_fit_alpha_shape_before_fitting(self, fitter):
-        # Shape should be (n_spectral_indices=1, n_bins=3).
-        assert fitter.fit_alpha.shape == (1, 3)
+        # Shape should be (n_extension=1, n_spectral_indices=1, n_bins=3).
+        assert fitter.fit_alpha.shape == (1, 1, 3)
 
     def test_fit_beta_shape_before_fitting(self, fitter):
-        assert fitter.fit_beta.shape == (1, 3)
+        assert fitter.fit_beta.shape == (1, 1, 3)
 
     def test_explicit_bin_edges_count(self):
         """Passing k explicit edges should produce k-1 bins."""
@@ -135,29 +135,29 @@ class TestKingPSFFitterUncorrelated:
 
     def test_all_bins_have_enough_events(self, result):
         fitter, _, _ = result
-        assert np.all(fitter.event_counts[0] >= 100)
+        assert np.all(fitter.event_counts[0, 0] >= 100)
 
     def test_alpha_consistent_across_bins(self, result):
         """Coefficient of variation of fitted alpha should be small (<30%)."""
         fitter, _, _ = result
-        alphas = fitter.fit_alpha[0]
+        alphas = fitter.fit_alpha[0, 0]
         assert alphas.std() / alphas.mean() < 0.30
 
     def test_beta_consistent_across_bins(self, result):
         """Coefficient of variation of fitted beta should be small (<30%)."""
         fitter, _, _ = result
-        betas = fitter.fit_beta[0]
+        betas = fitter.fit_beta[0, 0]
         assert betas.std() / betas.mean() < 0.30
 
     def test_mean_alpha_roughly_accurate(self, result):
         """Mean fitted alpha should be within 30% of the true value."""
         fitter, alpha_true, _ = result
-        assert_allclose(fitter.fit_alpha[0].mean(), alpha_true, rtol=0.30)
+        assert_allclose(fitter.fit_alpha[0, 0].mean(), alpha_true, rtol=0.30)
 
     def test_mean_beta_roughly_accurate(self, result):
         """Mean fitted beta should be within 40% of the true value."""
         fitter, _, beta_true = result
-        assert_allclose(fitter.fit_beta[0].mean(), beta_true, rtol=0.40)
+        assert_allclose(fitter.fit_beta[0, 0].mean(), beta_true, rtol=0.40)
 
 
 # ---------------------------------------------------------------------------
@@ -204,22 +204,22 @@ class TestKingPSFFitterCorrelated:
 
     def test_alpha_decreases_with_energy(self, result):
         """Higher-energy bins should produce a smaller fitted alpha."""
-        alphas = result.fit_alpha[0]
+        alphas = result.fit_alpha[0, 0]
         assert alphas[0] > alphas[1] > alphas[2]
 
     def test_beta_increases_with_energy(self, result):
         """Higher-energy bins should produce a larger fitted beta."""
-        betas = result.fit_beta[0]
+        betas = result.fit_beta[0, 0]
         assert betas[0] < betas[1] < betas[2]
 
     def test_alpha_values_per_bin(self, result):
         """Fitted alpha per bin should be within 40% of the true value."""
-        alphas = result.fit_alpha[0]
+        alphas = result.fit_alpha[0, 0]
         for i, (alpha_true, _, _) in enumerate(self._GROUP_PARAMS):
             assert_allclose(alphas[i], alpha_true, rtol=0.40, err_msg=f"bin {i}: alpha mismatch")
 
     def test_beta_values_per_bin(self, result):
         """Fitted beta per bin should be within 50% of the true value."""
-        betas = result.fit_beta[0]
+        betas = result.fit_beta[0, 0]
         for i, (_, beta_true, _) in enumerate(self._GROUP_PARAMS):
             assert_allclose(betas[i], beta_true, rtol=0.50, err_msg=f"bin {i}: beta mismatch")
