@@ -223,3 +223,85 @@ class TestKingPSFFitterCorrelated:
         betas = result.fit_beta[0, 0]
         for i, (_, beta_true, _) in enumerate(self._GROUP_PARAMS):
             assert_allclose(betas[i], beta_true, rtol=0.50, err_msg=f"bin {i}: beta mismatch")
+
+
+# ---------------------------------------------------------------------------
+# extension_grid
+# ---------------------------------------------------------------------------
+
+
+class TestKingPSFFitterExtensionGrid:
+    def test_default_is_point_source(self):
+        rng = np.random.default_rng(RNG_SEED)
+        events = _make_events(500, np.radians(1.0), 2.5, "aux", np.zeros(500), rng)
+        fitter = KingPSFFitter(
+            events, parametrization_bins={"aux": [-1.0, 1.0]}, minimum_counts=100, weight_field=None
+        )
+        assert_allclose(fitter.extension_grid, [0.0])
+
+    def test_negative_extension_raises(self):
+        rng = np.random.default_rng(RNG_SEED)
+        events = _make_events(500, np.radians(1.0), 2.5, "aux", np.zeros(500), rng)
+        with pytest.raises(ValueError):
+            KingPSFFitter(
+                events,
+                parametrization_bins={"aux": [-1.0, 1.0]},
+                minimum_counts=100,
+                weight_field=None,
+                extension_grid=[-0.1, 0.0],
+            )
+
+    def test_extension_grid_is_sorted(self):
+        rng = np.random.default_rng(RNG_SEED)
+        events = _make_events(500, np.radians(1.0), 2.5, "aux", np.zeros(500), rng)
+        fitter = KingPSFFitter(
+            events,
+            parametrization_bins={"aux": [-1.0, 1.0]},
+            minimum_counts=100,
+            weight_field=None,
+            extension_grid=[np.radians(2.0), 0.0, np.radians(1.0)],
+        )
+        assert_allclose(fitter.extension_grid, [0.0, np.radians(1.0), np.radians(2.0)])
+
+    @pytest.fixture(scope="class")
+    def multi_ext_result(self):
+        rng = np.random.default_rng(RNG_SEED)
+        alpha_true, beta_true = np.radians(1.0), 2.5
+        n = 100_000
+        events = _make_events(n, alpha_true, beta_true, "aux", np.zeros(n), rng)
+        extension_grid = np.radians([0.0, 1.0, 2.0])
+        fitter = KingPSFFitter(
+            events,
+            parametrization_bins={"aux": [-1.0, 1.0]},
+            dpsi_nbins=100,
+            minimum_counts=100,
+            weight_field=None,
+            extension_grid=extension_grid,
+        )
+        result = fitter.fit_all_bins(verbose=False)
+        return result, alpha_true, beta_true, extension_grid
+
+    def test_shape_matches_extension_grid(self, multi_ext_result):
+        result, _, _, extension_grid = multi_ext_result
+        assert result["alpha"].shape == (len(extension_grid), 1, 1)
+        assert result["beta"].shape == (len(extension_grid), 1, 1)
+        assert_allclose(result["extension_grid"], extension_grid)
+
+    def test_fitted_values_finite_and_valid(self, multi_ext_result):
+        result, _, _, _ = multi_ext_result
+        assert np.all(np.isfinite(result["alpha"]))
+        assert np.all(np.isfinite(result["beta"]))
+        assert np.all(result["alpha"] > 0)
+        assert np.all(result["beta"] > 1)
+
+    def test_zero_extension_recovers_point_source_fit(self, multi_ext_result):
+        """extension=0 should reproduce the un-smeared point-source fit."""
+        result, alpha_true, beta_true, _ = multi_ext_result
+        assert_allclose(result["alpha"][0, 0, 0], alpha_true, rtol=0.1)
+        assert_allclose(result["beta"][0, 0, 0], beta_true, rtol=0.2)
+
+    def test_alpha_increases_with_extension(self, multi_ext_result):
+        """A wider source extension should widen the fitted PSF."""
+        result, _, _, _ = multi_ext_result
+        alphas = result["alpha"][:, 0, 0]
+        assert alphas[0] < alphas[1] < alphas[2]

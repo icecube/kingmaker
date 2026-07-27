@@ -59,6 +59,32 @@ def _make_likelihood(tmp_path, angular_cutoff=np.pi):
     )
 
 
+# Three extensions; alpha grows with extension index so per-source
+# differentiation is directly observable.
+MULTI_EXTENSION_GRID = np.radians([0.0, 1.0, 3.0])
+MULTI_EXT_ALPHA_VALUES = np.stack([ALPHA_VALUES[0] * scale for scale in (1.0, 2.0, 4.0)])
+MULTI_EXT_BETA_VALUES = np.stack([BETA_VALUES[0] for _ in range(3)])
+
+
+def _make_multi_ext_likelihood(tmp_path, angular_cutoff=np.pi):
+    cache_path = tmp_path / "king_cache_multi_ext.npz"
+    np.savez(
+        cache_path,
+        parametrization_bins=np.array({"aux": BIN_EDGES}, dtype=object),
+        alpha=MULTI_EXT_ALPHA_VALUES,
+        beta=MULTI_EXT_BETA_VALUES,
+        extension_grid=MULTI_EXTENSION_GRID,
+    )
+    return KingSpatialLikelihood(
+        signal_events=np.empty(0),
+        parametrization_bins={"aux": 3},
+        spectral_indices=SPECTRAL_INDICES,
+        cache_parameters=True,
+        cache_name=str(cache_path),
+        angular_cutoff=angular_cutoff,
+    )
+
+
 def _make_events(n_per_bin, rng, offset_scale=np.radians(2.0)):
     """n_per_bin events at each of the 3 known bin centers (0.5, 1.5, 2.5),
     at small random offsets from a source at (ra=0, dec=0)."""
@@ -326,3 +352,70 @@ class TestPdfMatricesShape:
 
         result = likelihood.evaluate_pdf(events_10, gamma=2.0)
         assert result.shape == (len(events_10), 1)
+
+
+class TestNearestExtensionIndex:
+    def test_snaps_to_nearest(self, tmp_path):
+        likelihood = _make_multi_ext_likelihood(tmp_path)
+        idx = likelihood._nearest_extension_index(np.radians([0.4, 1.6, 2.9]))
+        np.testing.assert_array_equal(idx, [0, 1, 2])
+
+
+class TestSourceExtensions:
+    def test_default_is_zero(self, tmp_path):
+        likelihood = _make_multi_ext_likelihood(tmp_path)
+        rng = np.random.default_rng(10)
+        events = _make_events(5, rng)
+        likelihood.set_events(events, source_ras=np.array([0.0]), source_decs=np.array([0.0]))
+        np.testing.assert_array_equal(likelihood.source_extensions, [0.0])
+
+    def test_narrower_extension_source_has_higher_nearby_pdf(self, tmp_path):
+        likelihood = _make_multi_ext_likelihood(tmp_path)
+        src_ras = np.array([0.0, 0.0])
+        src_decs = np.array([0.0, 0.0])
+        src_exts = np.array([MULTI_EXTENSION_GRID[0], MULTI_EXTENSION_GRID[2]])
+
+        dtype = [("ra", float), ("dec", float), ("aux", float)]
+        events = np.zeros(1, dtype=dtype)
+        events["ra"], events["dec"], events["aux"] = np.radians(0.1), 0.0, 0.5
+
+        likelihood.set_events(
+            events, source_ras=src_ras, source_decs=src_decs, source_extensions=src_exts
+        )
+        result = likelihood.evaluate_pdf(events, gamma=2.0).toarray()
+        assert result[0, 0] > result[0, 1]
+
+    def test_missing_extension_grid_key_raises(self, tmp_path):
+        cache_path = tmp_path / "stale_no_key.npz"
+        np.savez(
+            cache_path,
+            parametrization_bins=np.array({"aux": BIN_EDGES}, dtype=object),
+            alpha=ALPHA_VALUES[0],
+            beta=BETA_VALUES[0],
+        )
+        with pytest.raises(ValueError):
+            KingSpatialLikelihood(
+                signal_events=np.empty(0),
+                parametrization_bins={"aux": 3},
+                spectral_indices=SPECTRAL_INDICES,
+                cache_parameters=True,
+                cache_name=str(cache_path),
+            )
+
+    def test_wrong_ndim_raises(self, tmp_path):
+        cache_path = tmp_path / "stale_wrong_ndim.npz"
+        np.savez(
+            cache_path,
+            parametrization_bins=np.array({"aux": BIN_EDGES}, dtype=object),
+            alpha=ALPHA_VALUES[0],
+            beta=BETA_VALUES[0],
+            extension_grid=np.array([0.0]),
+        )
+        with pytest.raises(ValueError):
+            KingSpatialLikelihood(
+                signal_events=np.empty(0),
+                parametrization_bins={"aux": 3},
+                spectral_indices=SPECTRAL_INDICES,
+                cache_parameters=True,
+                cache_name=str(cache_path),
+            )
