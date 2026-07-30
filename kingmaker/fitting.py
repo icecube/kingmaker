@@ -559,7 +559,7 @@ class KingPSFFitter:
 
         return False
 
-    def get_interpolator(self, gamma_index: int = 0) -> Tuple[Any, Any]:
+    def get_interpolator(self, gamma_index: int = 0, extension_index: int = 0) -> Tuple[Any, Any]:
         """
         Get an interpolator for fitted parameters at a given spectral index.
 
@@ -567,6 +567,8 @@ class KingPSFFitter:
         ----------
         gamma_index : int, optional
             Index of the spectral index to use. Default is 0.
+        extension_index : int, optional
+            Index into extension_grid to use. Default is 0.
 
         Returns
         -------
@@ -586,7 +588,7 @@ class KingPSFFitter:
         # Create interpolators
         alpha_interp = RegularGridInterpolator(
             tuple(bin_centers),
-            self.fit_alpha[gamma_index],
+            self.fit_alpha[extension_index, gamma_index],
             method="linear",
             bounds_error=False,
             fill_value=self.fit_alpha[gamma_index].mean(),
@@ -594,7 +596,7 @@ class KingPSFFitter:
 
         beta_interp = RegularGridInterpolator(
             tuple(bin_centers),
-            self.fit_beta[gamma_index],
+            self.fit_beta[extension_index, gamma_index],
             method="linear",
             bounds_error=False,
             fill_value=self.fit_beta[gamma_index].mean(),
@@ -606,6 +608,7 @@ class KingPSFFitter:
         self,
         bin_indices: Union[Tuple[int, ...], Dict[str, int]],
         gamma_index: int = 0,
+        extension_index: int = 0,
         ax: Optional[Any] = None,
     ) -> Any:
         """
@@ -618,6 +621,8 @@ class KingPSFFitter:
             mapping bin names to indices.
         gamma_index : int, optional
             Index of spectral index. Default is 0.
+        extension_index : int, optional
+            Index into extension_grid to use. Default is 0.
         ax : matplotlib.axes.Axes, optional
             Axes to plot on. If None, creates new figure.
 
@@ -640,7 +645,7 @@ class KingPSFFitter:
         if isinstance(bin_indices, dict):
             bin_indices = tuple(bin_indices[key] for key in self.bin_names)
 
-        param_idx = tuple([gamma_index] + list(bin_indices))
+        param_idx = (extension_index, gamma_index) + tuple(bin_indices)
 
         # Get histogram data
         hist = self.histograms[param_idx]
