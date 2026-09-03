@@ -527,11 +527,6 @@ class KingPSFFitter:
         tuple
             (alpha_interpolator, beta_interpolator) functions that interpolate
             fitted parameters based on parameterization bin values.
-
-        Notes
-        -----
-        Requires scipy.interpolate.RegularGridInterpolator (not imported by default
-        to avoid dependency). This method will raise ImportError if scipy is not available.
         """
         from scipy.interpolate import RegularGridInterpolator
 
@@ -546,15 +541,17 @@ class KingPSFFitter:
         alpha_interp = RegularGridInterpolator(
             tuple(bin_centers),
             self.fit_alpha[gamma_index],
+            method="linear",
             bounds_error=False,
-            fill_value=None,  # Extrapolate
+            fill_value=self.fit_alpha[gamma_index].mean(),
         )
 
         beta_interp = RegularGridInterpolator(
             tuple(bin_centers),
             self.fit_beta[gamma_index],
+            method="linear",
             bounds_error=False,
-            fill_value=None,  # Extrapolate
+            fill_value=self.fit_beta[gamma_index].mean(),
         )
 
         return alpha_interp, beta_interp
