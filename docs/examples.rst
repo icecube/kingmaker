@@ -141,7 +141,7 @@ bin.
    )
    results = fitter.fit_all_bins(verbose=True)
 
-   alpha_fit = results["alpha"]  # shape (n_gamma, n_logE, n_dec)
+   alpha_fit = results["alpha"]  # shape (n_extension, n_gamma, n_logE, n_dec)
    beta_fit = results["beta"]
 
    # Continuous evaluation between bin centers:
@@ -192,8 +192,9 @@ above:
    from kingmaker.wrapper import KingSpatialLikelihood
    import numpy as np
 
-   # Source catalog for the signal-subtraction (marginalized) path.
-   catalog_decs = np.radians(np.linspace(-60, 60, 13))
+   # Stand-in "data" events and a point-source position for one trial.
+   data_events = signal_events[:1000]
+   source_ra, source_dec = 0.5, 0.2
 
    wrapper = KingSpatialLikelihood(
        signal_events=signal_events,
@@ -202,13 +203,9 @@ above:
        cache_parameters=False,
        # Enable the RA-marginalized path for signal-subtraction likelihoods.
        enable_marginalization=True,
-       marginalization_source_decs=catalog_decs,
+       marginalization_source_decs=np.array([source_dec]),
        marginalization_angular_cutoff=np.radians(10.0),
    )
-
-   # Stand-in "data" events and a point-source position for one trial.
-   data_events = signal_events[:1000]
-   source_ra, source_dec = 0.5, 0.2
 
    # Per trial: cache per-event parameters once, then evaluate as needed.
    # set_events precomputes both the standard and marginalized PDF matrices.
