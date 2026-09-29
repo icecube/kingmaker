@@ -142,11 +142,23 @@ class KingSpatialLikelihood:
         # Extension grid (bin-center-style values, nearest-snapped per source).
         if "extension_grid" not in fitted_parameters:
             raise ValueError(f"Cache {cache_name!r} has no extension_grid. Delete it and refit.")
-        self.extension_grid = np.sort(np.atleast_1d(fitted_parameters["extension_grid"]))
+        self.extension_grid = np.sort(
+            np.atleast_1d(fitted_parameters["extension_grid"]).astype(np.float64)
+        )
+        if self.extension_grid.ndim != 1 or not np.all(np.isfinite(self.extension_grid)) or np.any(
+            self.extension_grid < 0
+        ):
+            raise ValueError("extension_grid must be a 1-D, finite, non-negative array of radians.")
 
         # And grab the fitted alpha/beta arrays, shape (n_extension, n_gamma, *bins).
         self.alpha_values = fitted_parameters["alpha"]
         self.beta_values = fitted_parameters["beta"]
+        if self.alpha_values.shape[0] != len(self.extension_grid) or self.beta_values.shape[0] != len(
+            self.extension_grid
+        ):
+            raise ValueError(
+                "Cached alpha/beta first axis must match extension_grid length. Delete the cache and refit."
+            )
         expected_ndim = 2 + len(self.parametrization_bins)
         if self.alpha_values.ndim != expected_ndim or self.beta_values.ndim != expected_ndim:
             raise ValueError(
@@ -220,9 +232,12 @@ class KingSpatialLikelihood:
             return False
         if len(self.source_decs) != len(source_decs):
             return False
-        if source_extensions is not None and not np.array_equal(
-            self.source_extensions, source_extensions
-        ):
+        expected_ext = (
+            np.zeros(len(source_ras), dtype=np.float64)
+            if source_extensions is None
+            else np.asarray(source_extensions, dtype=np.float64)
+        )
+        if self.source_extensions is None or not np.array_equal(self.source_extensions, expected_ext):
             return False
         return np.array_equal(self.source_ras, source_ras) and np.array_equal(
             self.source_decs, source_decs
@@ -262,7 +277,8 @@ class KingSpatialLikelihood:
         source_extensions : ndarray, optional
             Source extension radii in radians, nearest-snapped to the fitted
             ``extension_grid``. Defaults to zero (point source) for every
-            source.
+            source. If marginalization is enabled, ``marginalization_source_decs``
+            must correspond 1:1 with these sources.
 
         Raises
         ------

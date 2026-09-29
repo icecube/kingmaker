@@ -591,7 +591,7 @@ class KingPSFFitter:
             self.fit_alpha[extension_index, gamma_index],
             method="linear",
             bounds_error=False,
-            fill_value=self.fit_alpha[gamma_index].mean(),
+            fill_value=self.fit_alpha[extension_index, gamma_index].mean(),
         )
 
         beta_interp = RegularGridInterpolator(
