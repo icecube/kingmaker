@@ -64,9 +64,9 @@ class KingPSFFitter:
     Attributes
     ----------
     fit_alpha : ndarray
-        Fitted alpha parameters, shape (n_extension, n_gamma, *bins).
+        Fitted alpha parameters, shape ``(n_extension, n_gamma, *bins)``.
     fit_beta : ndarray
-        Fitted beta parameters, shape (n_extension, n_gamma, *bins).
+        Fitted beta parameters, shape ``(n_extension, n_gamma, *bins)``.
     histograms : ndarray
         Histogram values for each bin.
     uncertainties : ndarray
