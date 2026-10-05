@@ -1,13 +1,19 @@
 """
 Unit tests for kingmaker.utils.
 
-Covers angular_distance, meshgrid2d, offset_position, and sample_with_extension.
+Covers angular_distance, meshgrid2d, offset_position, sample_with_extension, and _bin_index.
 """
 
 import numpy as np
 from numpy.testing import assert_allclose
 
-from kingmaker.utils import angular_distance, meshgrid2d, offset_position, sample_with_extension
+from kingmaker.utils import (
+    _bin_index,
+    angular_distance,
+    meshgrid2d,
+    offset_position,
+    sample_with_extension,
+)
 
 # ---------------------------------------------------------------------------
 # angular_distance
@@ -203,3 +209,15 @@ class TestOffsetPosition:
         ra, dec = offset_position(1.0, 0.0, 0.1, np.pi / 2)
         assert_allclose(ra, 1.1)
         assert_allclose(dec, 0.0, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# _bin_index
+# ---------------------------------------------------------------------------
+
+
+class TestBinIndex:
+    def test_interior_and_clamped(self):
+        edges = np.array([0.0, 1.0, 3.0])
+        values = [-5.0, 0.0, 0.99, 1.0, 2.9, 3.0, 10.0]
+        np.testing.assert_array_equal(_bin_index(edges, values), [0, 0, 0, 1, 1, 1, 1])
