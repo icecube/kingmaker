@@ -11,7 +11,6 @@ from numpy.testing import assert_allclose
 
 from kingmaker.pdf import KingPDF, MarginalizedKingPDF
 
-
 # ---------------------------------------------------------------------------
 # Shared fixtures and helpers
 # ---------------------------------------------------------------------------

@@ -12,35 +12,41 @@ import numpy as np
 import pytest
 
 from kingmaker.pdf import KingPDF
-from kingmaker.utils import angular_distance, _interp1d
-from kingmaker.wrapper import KingSpatialLikelihood
-
+from kingmaker.utils import _interp1d, angular_distance
+from kingmaker.wrapper import KingSpatialLikelihood, _nearest_index
 
 SPECTRAL_INDICES = np.array([1.0, 2.0, 3.0])
 BIN_EDGES = np.array([0.0, 1.0, 2.0, 3.0])  # bin centers: 0.5, 1.5, 2.5
+EXTENSION_GRID = np.array([0.0])  # single point-source extension
+# shape (n_extension=1, n_gamma=3, n_bins=3)
 ALPHA_VALUES = np.array(
     [
-        [np.radians(0.5), np.radians(1.0), np.radians(1.5)],
-        [np.radians(0.6), np.radians(1.1), np.radians(1.6)],
-        [np.radians(0.7), np.radians(1.2), np.radians(1.7)],
+        [
+            [np.radians(0.5), np.radians(1.0), np.radians(1.5)],
+            [np.radians(0.6), np.radians(1.1), np.radians(1.6)],
+            [np.radians(0.7), np.radians(1.2), np.radians(1.7)],
+        ]
     ]
 )
 BETA_VALUES = np.array(
     [
-        [2.0, 2.5, 3.0],
-        [2.1, 2.6, 3.1],
-        [2.2, 2.7, 3.2],
+        [
+            [2.0, 2.5, 3.0],
+            [2.1, 2.6, 3.1],
+            [2.2, 2.7, 3.2],
+        ]
     ]
 )
 
 
-def _make_likelihood(tmp_path, angular_cutoff=np.pi):
+def _make_likelihood(tmp_path, angular_cutoff=np.pi, **kwargs):
     cache_path = tmp_path / "king_cache.npz"
     np.savez(
         cache_path,
         parametrization_bins=np.array({"aux": BIN_EDGES}, dtype=object),
         alpha=ALPHA_VALUES,
         beta=BETA_VALUES,
+        extension_grid=EXTENSION_GRID,
     )
     return KingSpatialLikelihood(
         signal_events=np.empty(0),
@@ -49,10 +55,41 @@ def _make_likelihood(tmp_path, angular_cutoff=np.pi):
         cache_parameters=True,
         cache_name=str(cache_path),
         angular_cutoff=angular_cutoff,
+        **kwargs,
     )
 
 
-def _make_events(n_per_bin, rng, offset_scale=np.radians(2.0)):
+# Three extensions; alpha grows with extension index so per-source
+# differentiation is directly observable.
+MULTI_EXTENSION_GRID = np.radians([0.0, 1.0, 3.0])
+MULTI_EXT_ALPHA_VALUES = np.stack([ALPHA_VALUES[0] * scale for scale in (1.0, 2.0, 4.0)])
+MULTI_EXT_BETA_VALUES = np.stack([BETA_VALUES[0] for _ in range(3)])
+
+
+def _make_multi_ext_likelihood(tmp_path, angular_cutoff=np.pi, extension_grid=None):
+    cache_path = tmp_path / "king_cache_multi_ext.npz"
+    np.savez(
+        cache_path,
+        parametrization_bins=np.array({"aux": BIN_EDGES}, dtype=object),
+        alpha=MULTI_EXT_ALPHA_VALUES,
+        beta=MULTI_EXT_BETA_VALUES,
+        extension_grid=MULTI_EXTENSION_GRID,
+    )
+    return KingSpatialLikelihood(
+        signal_events=np.empty(0),
+        parametrization_bins={"aux": 3},
+        spectral_indices=SPECTRAL_INDICES,
+        cache_parameters=True,
+        cache_name=str(cache_path),
+        angular_cutoff=angular_cutoff,
+        extension_grid=extension_grid,
+    )
+
+
+OFFSET_SCALE = np.radians(2.0)
+
+
+def _make_events(n_per_bin, rng, offset_scale=OFFSET_SCALE):
     """n_per_bin events at each of the 3 known bin centers (0.5, 1.5, 2.5),
     at small random offsets from a source at (ra=0, dec=0)."""
     aux_centers = [0.5, 1.5, 2.5]
@@ -95,8 +132,8 @@ class TestEvaluatePdfExactGamma:
         for gamma_idx, gamma in enumerate(SPECTRAL_INDICES):
             result = likelihood.evaluate_pdf(events, gamma=gamma).toarray().ravel()
 
-            alpha = ALPHA_VALUES[gamma_idx][bin_idx]
-            beta = BETA_VALUES[gamma_idx][bin_idx]
+            alpha = ALPHA_VALUES[0][gamma_idx][bin_idx]
+            beta = BETA_VALUES[0][gamma_idx][bin_idx]
             expected = king_pdf.pdf(dist, alpha, beta)
 
             np.testing.assert_allclose(result, expected, rtol=1e-10)
@@ -145,8 +182,8 @@ class TestMultipleSources:
 
         bin_idx = np.array([_bin_index(a) for a in events["aux"]])
         gamma_idx = int(np.searchsorted(SPECTRAL_INDICES, 2.0))
-        alpha = ALPHA_VALUES[gamma_idx][bin_idx]
-        beta = BETA_VALUES[gamma_idx][bin_idx]
+        alpha = ALPHA_VALUES[0][gamma_idx][bin_idx]
+        beta = BETA_VALUES[0][gamma_idx][bin_idx]
         king_pdf = KingPDF(angular_cutoff=likelihood.king_pdf.angular_cutoff)
 
         dense = result.toarray()
@@ -178,8 +215,8 @@ class TestMultipleSources:
 
         bin_idx = np.array([_bin_index(a) for a in events["aux"]])
         gamma_idx = int(np.searchsorted(SPECTRAL_INDICES, 2.0))
-        alpha = ALPHA_VALUES[gamma_idx][bin_idx]
-        beta = BETA_VALUES[gamma_idx][bin_idx]
+        alpha = ALPHA_VALUES[0][gamma_idx][bin_idx]
+        beta = BETA_VALUES[0][gamma_idx][bin_idx]
         king_pdf = KingPDF(angular_cutoff=cutoff)
 
         for j, (src_ra, src_dec) in enumerate(zip(src_ras, src_decs)):
@@ -319,3 +356,199 @@ class TestPdfMatricesShape:
 
         result = likelihood.evaluate_pdf(events_10, gamma=2.0)
         assert result.shape == (len(events_10), 1)
+
+
+class TestNearestIndex:
+    def test_snaps_to_nearest(self):
+        idx = _nearest_index(MULTI_EXTENSION_GRID, np.radians([0.4, 1.6, 2.9]))
+        np.testing.assert_array_equal(idx, [0, 1, 2])
+
+    def test_single_center(self):
+        np.testing.assert_array_equal(_nearest_index(np.array([1.0]), [0.5, 1.5]), [0, 0])
+
+
+class TestSourceExtensions:
+    def test_default_is_zero(self, tmp_path):
+        likelihood = _make_multi_ext_likelihood(tmp_path)
+        rng = np.random.default_rng(10)
+        events = _make_events(5, rng)
+        likelihood.set_events(events, source_ras=np.array([0.0]), source_decs=np.array([0.0]))
+        np.testing.assert_array_equal(likelihood.source_extensions, [0.0])
+
+    def test_narrower_extension_source_has_higher_nearby_pdf(self, tmp_path):
+        likelihood = _make_multi_ext_likelihood(tmp_path)
+        src_ras = np.array([0.0, 0.0])
+        src_decs = np.array([0.0, 0.0])
+        src_exts = np.array([MULTI_EXTENSION_GRID[0], MULTI_EXTENSION_GRID[2]])
+
+        dtype = [("ra", float), ("dec", float), ("aux", float)]
+        events = np.zeros(1, dtype=dtype)
+        events["ra"], events["dec"], events["aux"] = np.radians(0.1), 0.0, 0.5
+
+        likelihood.set_events(
+            events, source_ras=src_ras, source_decs=src_decs, source_extensions=src_exts
+        )
+        result = likelihood.evaluate_pdf(events, gamma=2.0).toarray()
+        assert result[0, 0] > result[0, 1]
+
+    def test_none_after_extended_resets_to_point_source(self, tmp_path):
+        likelihood = _make_multi_ext_likelihood(tmp_path)
+        src_ras, src_decs = np.array([0.0]), np.array([0.0])
+        events = _make_events(5, np.random.default_rng(11))
+
+        likelihood.set_events(
+            events,
+            source_ras=src_ras,
+            source_decs=src_decs,
+            source_extensions=MULTI_EXTENSION_GRID[2:],
+        )
+        likelihood.set_events(events, source_ras=src_ras, source_decs=src_decs)
+        result = likelihood.evaluate_pdf(events, gamma=2.0).toarray()
+
+        fresh = _make_multi_ext_likelihood(tmp_path)
+        fresh.set_events(events, source_ras=src_ras, source_decs=src_decs)
+        expected = fresh.evaluate_pdf(events, gamma=2.0).toarray()
+
+        np.testing.assert_array_equal(likelihood.source_extensions, [0.0])
+        np.testing.assert_allclose(result, expected, rtol=1e-12)
+
+    def test_mismatched_extension_grid_raises(self, tmp_path):
+        with pytest.raises(ValueError):
+            _make_multi_ext_likelihood(tmp_path, extension_grid=np.radians([0.0, 2.0]))
+
+    def test_matching_extension_grid_loads(self, tmp_path):
+        likelihood = _make_multi_ext_likelihood(tmp_path, extension_grid=MULTI_EXTENSION_GRID[::-1])
+        np.testing.assert_allclose(likelihood.extension_grid, MULTI_EXTENSION_GRID)
+
+    def test_extension_outside_grid_raises(self, tmp_path):
+        likelihood = _make_multi_ext_likelihood(tmp_path)
+        events = _make_events(5, np.random.default_rng(13))
+        with pytest.raises(ValueError):
+            likelihood.set_events(
+                events,
+                source_ras=np.array([0.0]),
+                source_decs=np.array([0.0]),
+                source_extensions=np.radians([5.0]),
+            )
+
+    def test_failed_set_events_keeps_previous_state(self, tmp_path):
+        likelihood = _make_multi_ext_likelihood(tmp_path)
+        rng = np.random.default_rng(15)
+        events_a, events_b = _make_events(5, rng), _make_events(6, rng)
+        src_ras, src_decs = np.array([0.0]), np.array([0.0])
+        likelihood.set_events(events_a, source_ras=src_ras, source_decs=src_decs)
+        with pytest.raises(ValueError):
+            likelihood.set_events(
+                events_b,
+                source_ras=src_ras,
+                source_decs=src_decs,
+                source_extensions=np.radians([5.0]),
+            )
+        with pytest.raises(RuntimeError):
+            likelihood.evaluate_pdf(events_b, gamma=2.0)
+
+    def test_get_alpha_beta_gamma_extension_index(self, tmp_path):
+        likelihood = _make_multi_ext_likelihood(tmp_path)
+        events = _make_events(5, np.random.default_rng(14))
+        likelihood.set_events(events, source_ras=np.array([0.0]), source_decs=np.array([0.0]))
+        alpha, _ = likelihood.get_alpha_beta_gamma(2.0, events, extension_index=2)
+        bin_idx = [_bin_index(a) for a in events["aux"][likelihood.event_mask]]
+        np.testing.assert_allclose(alpha, MULTI_EXT_ALPHA_VALUES[2, 1, bin_idx])
+
+    def test_missing_extension_grid_key_raises(self, tmp_path):
+        cache_path = tmp_path / "stale_no_key.npz"
+        np.savez(
+            cache_path,
+            parametrization_bins=np.array({"aux": BIN_EDGES}, dtype=object),
+            alpha=ALPHA_VALUES[0],
+            beta=BETA_VALUES[0],
+        )
+        with pytest.raises(ValueError):
+            KingSpatialLikelihood(
+                signal_events=np.empty(0),
+                parametrization_bins={"aux": 3},
+                spectral_indices=SPECTRAL_INDICES,
+                cache_parameters=True,
+                cache_name=str(cache_path),
+            )
+
+    def test_wrong_ndim_raises(self, tmp_path):
+        cache_path = tmp_path / "stale_wrong_ndim.npz"
+        np.savez(
+            cache_path,
+            parametrization_bins=np.array({"aux": BIN_EDGES}, dtype=object),
+            alpha=ALPHA_VALUES[0],
+            beta=BETA_VALUES[0],
+            extension_grid=np.array([0.0]),
+        )
+        with pytest.raises(ValueError):
+            KingSpatialLikelihood(
+                signal_events=np.empty(0),
+                parametrization_bins={"aux": 3},
+                spectral_indices=SPECTRAL_INDICES,
+                cache_parameters=True,
+                cache_name=str(cache_path),
+            )
+
+    def test_unsorted_extension_grid_raises(self, tmp_path):
+        cache_path = tmp_path / "unsorted_ext.npz"
+        np.savez(
+            cache_path,
+            parametrization_bins=np.array({"aux": BIN_EDGES}, dtype=object),
+            alpha=MULTI_EXT_ALPHA_VALUES,
+            beta=MULTI_EXT_BETA_VALUES,
+            extension_grid=MULTI_EXTENSION_GRID[::-1],
+        )
+        with pytest.raises(ValueError):
+            KingSpatialLikelihood(
+                signal_events=np.empty(0),
+                parametrization_bins={"aux": 3},
+                spectral_indices=SPECTRAL_INDICES,
+                cache_parameters=True,
+                cache_name=str(cache_path),
+            )
+
+    def test_empty_extension_grid_raises(self, tmp_path):
+        cache_path = tmp_path / "empty_ext.npz"
+        np.savez(
+            cache_path,
+            parametrization_bins=np.array({"aux": BIN_EDGES}, dtype=object),
+            alpha=MULTI_EXT_ALPHA_VALUES[:0],
+            beta=MULTI_EXT_BETA_VALUES[:0],
+            extension_grid=np.array([]),
+        )
+        with pytest.raises(ValueError, match="non-empty"):
+            KingSpatialLikelihood(
+                signal_events=np.empty(0),
+                parametrization_bins={"aux": 3},
+                spectral_indices=SPECTRAL_INDICES,
+                cache_parameters=True,
+                cache_name=str(cache_path),
+            )
+
+
+MARG_KWARGS = {
+    "enable_marginalization": True,
+    "marginalization_points_alpha": np.radians([0.5, 2.0]),
+    "marginalization_points_beta": np.array([1.5, 3.5]),
+    "marginalization_n_signed_delta_dec": 10,
+    "marginalization_n_ra_bins": 10,
+}
+
+
+class TestMarginalizationSourceDecs:
+    def test_mismatched_decs_raise(self, tmp_path):
+        likelihood = _make_likelihood(
+            tmp_path, marginalization_source_decs=np.array([0.2]), **MARG_KWARGS
+        )
+        events = _make_events(5, np.random.default_rng(12))
+        with pytest.raises(ValueError):
+            likelihood.set_events(events, source_ras=np.array([0.0]), source_decs=np.array([0.3]))
+
+    def test_matching_decs_ok(self, tmp_path):
+        likelihood = _make_likelihood(
+            tmp_path, marginalization_source_decs=np.array([0.2]), **MARG_KWARGS
+        )
+        events = _make_events(5, np.random.default_rng(12))
+        likelihood.set_events(events, source_ras=np.array([0.0]), source_decs=np.array([0.2]))
+        assert likelihood.evaluate_marginalized_pdf(events, gamma=2.0).shape == (len(events), 1)

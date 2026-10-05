@@ -20,7 +20,7 @@ dynamic = ["version"]
 [project.optional-dependencies]
 dev = [
   "pre-commit",
-  "ruff",
+  "ruff==0.16.10",
   "mypy",
   "pytest",
   "pytest-cov",

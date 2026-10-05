@@ -1,4 +1,3 @@
-from typing import Tuple, Union
 import numpy as np
 import numpy.typing as npt
 from numba import njit, prange
@@ -31,10 +30,11 @@ def _interp1d(x: float, xlow: float, xhigh: float, ylow: float, yhigh: float) ->
     """
     return ylow + (yhigh - ylow) / (xhigh - xlow) * (x - xlow)
 
+
 @njit(cache=True)
-def _interp1d_order2(x: float,
-                     xlow: float, xnearest: float, xhigh: float,
-                     ylow: float, ynearest: float, yhigh: float) -> float:
+def _interp1d_order2(
+    x: float, xlow: float, xnearest: float, xhigh: float, ylow: float, ynearest: float, yhigh: float
+) -> float:
     """
     Perform 1D order-2 interpolation.
 
@@ -62,21 +62,20 @@ def _interp1d_order2(x: float,
     """
     # np.linalg.solve solves Ax = B. We'll use that
     # to get the coefficients in y = a x**2 + b * x + c.
-    A = np.array([[xlow**2, xnearest**2, xhigh**2],
-                  [xlow,    xnearest,    xhigh],
-                  [1,       1,           1]])
+    A = np.array([[xlow**2, xnearest**2, xhigh**2], [xlow, xnearest, xhigh], [1, 1, 1]])
     B = np.array([ylow, ynearest, yhigh])
     coeffs = np.linalg.solve(A, B)
 
     return np.dot(coeffs, np.array([x**2, x, 1]))
 
+
 @njit(cache=True)
 def angular_distance(
-    src_ra: Union[float, npt.NDArray[np.floating]],
-    src_dec: Union[float, npt.NDArray[np.floating]],
-    ra: Union[float, npt.NDArray[np.floating]],
-    dec: Union[float, npt.NDArray[np.floating]],
-) -> Union[float, npt.NDArray[np.floating]]:
+    src_ra: float | npt.NDArray[np.floating],
+    src_dec: float | npt.NDArray[np.floating],
+    ra: float | npt.NDArray[np.floating],
+    dec: float | npt.NDArray[np.floating],
+) -> float | npt.NDArray[np.floating]:
     """
     Calculate angular distance on the sphere using the haversine formula.
 
@@ -101,6 +100,76 @@ def angular_distance(
     """
     cosDist = np.cos(src_ra - ra) * np.cos(src_dec) * np.cos(dec) + np.sin(src_dec) * np.sin(dec)
     return np.arccos(np.minimum(np.maximum(cosDist, -1.0), 1.0))  # type: ignore[no-any-return]
+
+
+def offset_position(
+    ra: float | npt.NDArray[np.floating],
+    dec: float | npt.NDArray[np.floating],
+    distance: float | npt.NDArray[np.floating],
+    bearing: float | npt.NDArray[np.floating],
+) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+    """
+    Move (ra, dec) by an angular distance along a bearing on the sphere.
+
+    Parameters
+    ----------
+    ra, dec : float or ndarray
+        Starting position(s) in radians.
+    distance : float or ndarray
+        Angular distance(s) to move, in radians.
+    bearing : float or ndarray
+        Bearing(s) in radians, measured from north towards increasing ra.
+
+    Returns
+    -------
+    ra, dec : ndarray
+        Offset positions in radians.
+    """
+    sin_dec = np.sin(dec)
+    cos_dec = np.cos(dec)
+    sin_d = np.sin(distance)
+    cos_d = np.cos(distance)
+
+    sin_dec2 = np.clip(sin_dec * cos_d + cos_dec * sin_d * np.cos(bearing), -1.0, 1.0)
+    new_dec = np.arcsin(sin_dec2)
+    new_ra = np.mod(
+        ra + np.arctan2(np.sin(bearing) * sin_d * cos_dec, cos_d - sin_dec * sin_dec2),
+        2 * np.pi,
+    )
+    return new_ra, new_dec
+
+
+def sample_with_extension(
+    true_ra: float | npt.NDArray[np.floating],
+    true_dec: float | npt.NDArray[np.floating],
+    extension: float | npt.NDArray[np.floating],
+    rng: np.random.Generator | None = None,
+) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+    """
+    Sample a position offset from (true_ra, true_dec) by a Rayleigh(extension)
+    magnitude at a uniformly random bearing, simulating a source's angular extent.
+
+    Parameters
+    ----------
+    true_ra, true_dec : float or ndarray
+        True source position(s) in radians.
+    extension : float or ndarray
+        Rayleigh scale of the angular offset, in radians.
+    rng : np.random.Generator, optional
+        Random number generator. If None, uses np.random.default_rng().
+
+    Returns
+    -------
+    ra, dec : ndarray
+        Sampled positions in radians.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    true_ra, true_dec, extension = np.broadcast_arrays(true_ra, true_dec, extension)
+    d = rng.rayleigh(extension)
+    theta = rng.uniform(0, 2 * np.pi, size=np.shape(d))
+    return offset_position(true_ra, true_dec, d, theta)
 
 
 @njit(cache=True)
@@ -135,7 +204,7 @@ def _pre_mask_and_distance(
     src_ra: npt.NDArray[np.floating],
     src_dec: npt.NDArray[np.floating],
     cutoff: float,
-) -> Tuple[npt.NDArray[np.intp], npt.NDArray[np.intp], npt.NDArray[np.float64]]:
+) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.intp], npt.NDArray[np.float64]]:
     """Rectangular pre-filter and haversine for one or more sources, returned ready
     for input into a sparse array.
 
@@ -351,7 +420,7 @@ def _build_marginalized_grid(
 @njit(cache=True)
 def meshgrid2d(
     a: npt.NDArray[np.floating], b: npt.NDArray[np.floating]
-) -> Tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
     """
     Create a 2D meshgrid from 1D coordinate arrays, compatible with numba JIT compilation.
 

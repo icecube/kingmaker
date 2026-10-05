@@ -1,12 +1,13 @@
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
-from tqdm import tqdm
+from typing import Any, cast
+
 import numpy as np
 import numpy.typing as npt
 from scipy.optimize import minimize
+from tqdm import tqdm
 
 from .distribution import _cdf_and_gradient
 from .pdf import KingPDF
-from .utils import angular_distance
+from .utils import angular_distance, offset_position
 
 
 class KingPSFFitter:
@@ -42,7 +43,7 @@ class KingPSFFitter:
         The percentiles (ranging from 0-100) defining the range of weights to accept
         for the per-parametrization bin histogramming and fitting. Note that these are
         applied based on the weights based on sorted index value and not cumulative
-        weight value like np.percentile. Default is [0, 95],
+        weight value like np.percentile. Default is (0, 95).
     weight_field : str, optional
         Field name for oneweight. If None, equal weights are used.
     true_ra_name : str
@@ -55,13 +56,17 @@ class KingPSFFitter:
         Spectral indices (gamma) for reweighting. Default is [2.0].
     angular_cutoff : float, optional
         Maximum angular separation for King PDF. Default is pi.
+    extension_grid : array-like, optional
+        Source extension widths (Gaussian sigma) in radians, non-negative.
+        Each event's true position is displaced by a Rayleigh(extension)-magnitude
+        offset before computing dpsi. Default is [0.0], the point-source case.
 
     Attributes
     ----------
     fit_alpha : ndarray
-        Fitted alpha parameters for each bin.
+        Fitted alpha parameters, shape ``(n_extension, n_gamma, *bins)``.
     fit_beta : ndarray
-        Fitted beta parameters for each bin.
+        Fitted beta parameters, shape ``(n_extension, n_gamma, *bins)``.
     histograms : ndarray
         Histogram values for each bin.
     uncertainties : ndarray
@@ -75,17 +80,18 @@ class KingPSFFitter:
     def __init__(
         self,
         signal_events: npt.NDArray[Any],
-        parametrization_bins: Dict[str, Union[int, List, Tuple, npt.NDArray]],
+        parametrization_bins: dict[str, int | list | tuple | npt.NDArray],
         dpsi_nbins: int = 101,
         minimum_counts: int = 100,
         remove_weight_outliers=True,
-        weight_outlier_percentiles=[0, 95],
-        weight_field: Optional[str] = "ow",
+        weight_outlier_percentiles=(0, 95),
+        weight_field: str | None = "ow",
         true_ra_name: str = "trueRa",
         true_dec_name: str = "trueDec",
         true_energy_name: str = "trueE",
-        spectral_indices: Optional[Union[List[float], npt.NDArray[np.floating]]] = None,
+        spectral_indices: list[float] | npt.NDArray[np.floating] | None = None,
         angular_cutoff: float = np.pi,
+        extension_grid: list[float] | npt.NDArray[np.floating] | None = None,
     ) -> None:
         """Initialize the KingPSFFitter."""
         self.signal_events = signal_events
@@ -103,6 +109,18 @@ class KingPSFFitter:
         )
         self.angular_cutoff = angular_cutoff
 
+        self.extension_grid = np.atleast_1d(
+            np.asarray(extension_grid if extension_grid is not None else [0.0], dtype=np.float64)
+        )
+        if (
+            self.extension_grid.ndim != 1
+            or self.extension_grid.size == 0
+            or not np.all(np.isfinite(self.extension_grid))
+            or np.any(self.extension_grid < 0)
+        ):
+            raise ValueError("extension_grid must be a 1-D, finite, non-empty, non-negative array.")
+        self.extension_grid = np.sort(self.extension_grid)
+
         # Initialize King PDF
         self.king_pdf = KingPDF(angular_cutoff=angular_cutoff)
 
@@ -112,12 +130,16 @@ class KingPSFFitter:
         self.bin_names = list(self.parametrization_bins.keys())
         self.parametrization_shape = [len(bins) - 1 for bins in self.parametrization_bins.values()]
 
-        # Calculate angular distances
-        self.dpsi = angular_distance(
-            self.signal_events["ra"],
-            self.signal_events["dec"],
-            self.signal_events[self.true_ra_name],
-            self.signal_events[self.true_dec_name],
+        # Find default alpha value for failing bins.
+        self._alpha_guess = float(
+            np.median(
+                angular_distance(
+                    self.signal_events["ra"],
+                    self.signal_events["dec"],
+                    self.signal_events[self.true_ra_name],
+                    self.signal_events[self.true_dec_name],
+                )
+            )
         )
 
         # Bin events
@@ -140,7 +162,7 @@ class KingPSFFitter:
         self._initialize_storage()
 
     def _validate_fields(
-        self, parametrization_bins: Dict[str, Union[int, List, Tuple, npt.NDArray]]
+        self, parametrization_bins: dict[str, int | list | tuple | npt.NDArray]
     ) -> None:
         """
         Validate that required and parameterization fields exist in signal events.
@@ -156,6 +178,8 @@ class KingPSFFitter:
             If required fields are missing.
         """
         required_fields = ["ra", "dec", self.true_ra_name, self.true_dec_name]
+        if self.weight_field is not None:
+            required_fields.append(self.true_energy_name)
         if hasattr(self.signal_events, "dtype"):
             names = self.signal_events.dtype.names or ()
         else:
@@ -164,7 +188,7 @@ class KingPSFFitter:
         if missing_required:
             raise ValueError(f"Signal events missing required fields: {missing_required}")
 
-        missing_params = [key for key in parametrization_bins.keys() if key not in names]
+        missing_params = [key for key in parametrization_bins if key not in names]
         if missing_params:
             raise ValueError(
                 f"Parametrization fields {missing_params} not found in signal events. "
@@ -175,8 +199,8 @@ class KingPSFFitter:
             raise ValueError(f"Weight field '{self.weight_field}' not found in signal events.")
 
     def _setup_bins(
-        self, parametrization_bins: Dict[str, Union[int, List, Tuple, npt.NDArray]]
-    ) -> Dict[str, npt.NDArray[np.floating]]:
+        self, parametrization_bins: dict[str, int | list | tuple | npt.NDArray]
+    ) -> dict[str, npt.NDArray[np.floating]]:
         """
         Convert binning specifications to explicit bin edges.
 
@@ -198,7 +222,7 @@ class KingPSFFitter:
             elif isinstance(val, (tuple, list, np.ndarray)):
                 bins_dict[key] = np.asarray(val)
             else:
-                raise ValueError(
+                raise TypeError(
                     f"Unknown binning specification for '{key}': {val}. "
                     "Use int for number of bins or array-like for bin edges."
                 )
@@ -208,7 +232,7 @@ class KingPSFFitter:
         self,
         nbins: int,
         values: npt.NDArray[np.floating],
-        weights: Optional[npt.NDArray[np.floating]] = None,
+        weights: npt.NDArray[np.floating] | None = None,
     ) -> npt.NDArray[np.floating]:
         """
         Create bins with approximately equal number of (weighted) events.
@@ -249,7 +273,7 @@ class KingPSFFitter:
 
         return bin_edges
 
-    def _bin_events(self) -> Dict[str, npt.NDArray[np.integer]]:
+    def _bin_events(self) -> dict[str, npt.NDArray[np.integer]]:
         """
         Assign each event to a bin index for each parameterization dimension.
 
@@ -265,30 +289,39 @@ class KingPSFFitter:
 
     def _initialize_storage(self) -> None:
         """Initialize arrays to store fit results and diagnostics."""
-        shape_with_gamma = [len(self.spectral_indices)] + self.parametrization_shape
+        shape = [len(self.extension_grid), len(self.spectral_indices)] + self.parametrization_shape
 
         # Fit parameters
-        self.fit_alpha = np.full(shape_with_gamma, np.median(self.dpsi))
-        self.fit_beta = np.full(shape_with_gamma, 2.25)
+        rayleigh_median = self.extension_grid * np.sqrt(2 * np.log(2))
+        alpha_fallback = np.hypot(self._alpha_guess, rayleigh_median)
+        self.fit_alpha = np.empty(shape)
+        self.fit_alpha[...] = alpha_fallback.reshape(-1, *[1] * (len(shape) - 1))
+        self.fit_beta = np.full(shape, 2.25)
 
         # Diagnostics
-        self.histograms = np.zeros(shape_with_gamma + [self.dpsi_nbins], dtype=float)
-        self.uncertainties = np.zeros(shape_with_gamma + [self.dpsi_nbins], dtype=float)
-        self.dpsi_bins = np.zeros(shape_with_gamma + [self.dpsi_nbins + 1], dtype=float)
-        self.fit_quality = np.zeros(shape_with_gamma, dtype=float)
-        self.event_counts = np.zeros(shape_with_gamma, dtype=int)
+        self.histograms = np.zeros(shape + [self.dpsi_nbins], dtype=float)
+        self.uncertainties = np.zeros(shape + [self.dpsi_nbins], dtype=float)
+        self.dpsi_bins = np.zeros(shape + [self.dpsi_nbins + 1], dtype=float)
+        self.fit_quality = np.zeros(shape, dtype=float)
+        self.event_counts = np.zeros(shape, dtype=int)
 
-    def fit_all_bins(self, verbose: bool = True) -> Dict[str, npt.NDArray]:
+    def fit_all_bins(
+        self, verbose: bool = True, rng: np.random.Generator | None = None
+    ) -> dict[str, npt.NDArray]:
         """
         Fit King PSF parameters in all bins.
 
-        Iterates over all bins defined by parametrization_bins and spectral_indices,
-        fitting King distribution parameters to the angular error distribution.
+        Iterates over all bins defined by parametrization_bins, spectral_indices,
+        and extension_grid, fitting King distribution parameters to the angular
+        error distribution.
 
         Parameters
         ----------
         verbose : bool, optional
             Print progress information. Default is True.
+        rng : np.random.Generator, optional
+            Random number generator for the extension smearing draws. Defaults
+            to a fixed seed so repeated fits reproduce the same result.
 
         Returns
         -------
@@ -301,65 +334,92 @@ class KingPSFFitter:
             - 'dpsi_bins': angular error bin edges
             - 'fit_quality': chi-square values
             - 'event_counts': number of events per bin
+            - 'parametrization_bins': bin edges
+            - 'extension_grid': the extension values fit
         """
+        if rng is None:
+            rng = np.random.default_rng(0)
+
         if verbose:
             print(f"Fitting King PSF in {np.prod(self.parametrization_shape)} bins...")
             print(f"  Spectral indices: {self.spectral_indices}")
+            print(f"  Extensions: {self.extension_grid}")
             print(f"  Binning dimensions: {self.bin_names}")
 
-        # Iterate over spectral indices
-        for g_idx, gamma in enumerate(self.spectral_indices):
-            if verbose:
-                print(f"\n  Spectral index γ = {gamma:.2f}")
+        reco_ra = self.signal_events["ra"]
+        reco_dec = self.signal_events["dec"]
+        true_ra = self.signal_events[self.true_ra_name]
+        true_dec = self.signal_events[self.true_dec_name]
+        trueE = self.signal_events[self.true_energy_name] if self.weight_field is not None else None
+        ow = self.signal_events[self.weight_field] if self.weight_field is not None else None
 
-            # Calculate event weights
-            if self.weight_field is not None:
-                weights = self.signal_events[self.weight_field] * self.signal_events[
-                    self.true_energy_name
-                ] ** (-gamma)
-            else:
-                weights = np.ones(len(self.signal_events))
+        n_fitted = 0
+        n_skipped = 0
+        total_bins = np.prod(self.parametrization_shape)
+        for bin_indices in tqdm(np.ndindex(*self.parametrization_shape), total=total_bins):
+            flat_idx = int(np.ravel_multi_index(bin_indices, tuple(self.parametrization_shape)))
+            event_idx = self._event_sort_order[
+                self._bin_boundaries[flat_idx] : self._bin_boundaries[flat_idx + 1]
+            ]
+            if len(event_idx) == 0:
+                n_skipped += len(self.extension_grid) * len(self.spectral_indices)
+                continue
 
-            # Iterate over all bin combinations
-            n_fitted = 0
-            n_skipped = 0
+            bin_reco_ra = reco_ra[event_idx]
+            bin_reco_dec = reco_dec[event_idx]
+            bin_true_ra = true_ra[event_idx]
+            bin_true_dec = true_dec[event_idx]
+            bin_trueE = trueE[event_idx] if trueE is not None else None
+            bin_ow = ow[event_idx] if ow is not None else None
+            unit_offset = rng.rayleigh(1.0, size=len(event_idx))
+            bearing = rng.uniform(0, 2 * np.pi, size=len(event_idx))
 
-            total_bins = np.prod(self.parametrization_shape)
-            for bin_indices in tqdm(np.ndindex(*self.parametrization_shape), total=total_bins):
-                flat_idx = int(np.ravel_multi_index(bin_indices, tuple(self.parametrization_shape)))
-                event_idx = self._event_sort_order[
-                    self._bin_boundaries[flat_idx] : self._bin_boundaries[flat_idx + 1]
-                ]
-
-                if self.remove_weight_outliers and len(event_idx) > 0:
-                    bin_weights = weights[event_idx]
-                    idx_range = [
-                        int(len(bin_weights) * self.weight_outlier_percentiles[0] / 100),
-                        int(len(bin_weights) * self.weight_outlier_percentiles[1] / 100),
-                    ]
-                    idx = np.digitize(bin_weights, np.unique(bin_weights))
-                    event_idx = event_idx[(idx_range[0] <= idx) & (idx <= idx_range[1])]
-
-                n_events = len(event_idx)
-                param_idx = tuple([g_idx] + list(bin_indices))
-                self.event_counts[param_idx] = n_events
-
-                # Skip if insufficient events
-                if n_events < self.minimum_counts:
-                    n_skipped += 1
-                    continue
-
-                # Fit this bin
-                success = self._fit_single_bin(event_idx, weights, param_idx)
-                if success:
-                    n_fitted += 1
+            for ext_idx, extension in enumerate(self.extension_grid):
+                if extension == 0.0:
+                    bin_dpsi = angular_distance(
+                        bin_reco_ra, bin_reco_dec, bin_true_ra, bin_true_dec
+                    )
                 else:
-                    n_skipped += 1
+                    smeared_ra, smeared_dec = offset_position(
+                        bin_true_ra, bin_true_dec, extension * unit_offset, bearing
+                    )
+                    bin_dpsi = angular_distance(bin_reco_ra, bin_reco_dec, smeared_ra, smeared_dec)
 
-            if verbose:
-                print(f"    Fitted {n_fitted} bins, skipped {n_skipped} bins")
+                for g_idx, gamma in enumerate(self.spectral_indices):
+                    if bin_ow is not None:
+                        bin_weights = bin_ow * bin_trueE ** (-gamma)
+                    else:
+                        bin_weights = np.ones(len(event_idx))
+
+                    local_idx = np.arange(len(event_idx))
+                    if self.remove_weight_outliers and len(local_idx) > 0:
+                        idx_range = [
+                            int(len(local_idx) * self.weight_outlier_percentiles[0] / 100),
+                            int(len(local_idx) * self.weight_outlier_percentiles[1] / 100),
+                        ]
+                        idx = np.digitize(bin_weights, np.unique(bin_weights))
+                        local_idx = local_idx[(idx_range[0] <= idx) & (idx <= idx_range[1])]
+
+                    n_events = len(local_idx)
+                    param_idx = (ext_idx, g_idx) + tuple(bin_indices)
+                    self.event_counts[param_idx] = n_events
+
+                    # Skip if insufficient events
+                    if n_events < self.minimum_counts:
+                        n_skipped += 1
+                        continue
+
+                    # Fit this bin
+                    success = self._fit_single_bin(
+                        bin_dpsi[local_idx], bin_weights[local_idx], param_idx
+                    )
+                    if success:
+                        n_fitted += 1
+                    else:
+                        n_skipped += 1
 
         if verbose:
+            print(f"\nFitted {n_fitted} bins, skipped {n_skipped} bins")
             print("\nFitting complete!")
 
         return {
@@ -371,6 +431,7 @@ class KingPSFFitter:
             "fit_quality": self.fit_quality,
             "event_counts": self.event_counts,
             "parametrization_bins": self.parametrization_bins,  # type: ignore[dict-item]
+            "extension_grid": self.extension_grid,
         }
 
     def _cdf_chi2(self, cdf_hist, cdf_variance, bins, alpha, beta):
@@ -404,19 +465,19 @@ class KingPSFFitter:
 
     def _fit_single_bin(
         self,
-        event_idx: npt.NDArray[np.intp],
-        weights: npt.NDArray[np.floating],
-        param_idx: Tuple[int, ...],
+        masked_dpsi: npt.NDArray[np.floating],
+        masked_weights: npt.NDArray[np.floating],
+        param_idx: tuple[int, ...],
     ) -> bool:
         """
         Fit King parameters for a single bin.
 
         Parameters
         ----------
-        event_idx : ndarray
-            Integer indices of events in this bin.
-        weights : ndarray
-            Event weights.
+        masked_dpsi : ndarray
+            Angular errors for events in this bin.
+        masked_weights : ndarray
+            Event weights for events in this bin, not yet normalized.
         param_idx : tuple
             Index tuple for storing results.
 
@@ -425,10 +486,7 @@ class KingPSFFitter:
         bool
             True if fit succeeded, False otherwise.
         """
-        # Extract events in this bin
-        masked_dpsi = self.dpsi[event_idx]
-        masked_weights = weights[event_idx]
-        masked_weights /= masked_weights.sum()  # Normalize
+        masked_weights = masked_weights / masked_weights.sum()  # Normalize
 
         # Create bins for this subset. Also calculate the
         # phase space parameter while we're here. We'll need
@@ -451,12 +509,24 @@ class KingPSFFitter:
         cdf_hist = np.cumsum(hist)
         cdf_variance = np.cumsum(hist2) / np.sum(hist) ** 2
 
+        bounds = [
+            (np.nextafter(1e-4, np.pi), np.nextafter(self.angular_cutoff, 0)),
+            (1.01, 1000),
+        ]
+
+        def fit(alpha0, beta0):
+            return minimize(
+                lambda params: self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, *params),
+                [alpha0, beta0],
+                method="L-BFGS-B",
+                jac=True,
+                bounds=bounds,
+            )
+
         # Get initial guess by doing a rough scan over alpha and beta.
         alpha_median_guess = bin_centers[np.searchsorted(cdf_hist, 0.5)]
         alpha_candidates = np.clip(
-            alpha_median_guess * np.array([0.5, 0.75, 1.0, 1.5, 2.0]),
-            np.nextafter(1e-4, np.pi),
-            np.nextafter(self.angular_cutoff, 0),
+            alpha_median_guess * np.array([0.5, 0.75, 1.0, 1.5, 2.0]), *bounds[0]
         )
         beta_candidates = [1.25, 1.75, 2, 2.5, 4, 7, 9]
         best_prescan, alpha_guess, beta_guess = None, alpha_median_guess, 2
@@ -465,44 +535,24 @@ class KingPSFFitter:
                 val = self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, alpha, beta)[0]
                 if best_prescan is None or val < best_prescan:
                     best_prescan, alpha_guess, beta_guess = val, alpha, beta
-        result = minimize(
-            lambda params: self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, *params),
-            [alpha_guess, beta_guess],
-            method="L-BFGS-B",
-            jac=True,
-            bounds=[
-                (np.nextafter(1e-4, np.pi), np.nextafter(self.angular_cutoff, 0)),
-                (1.01, 1000),
-            ],
-        )
+        result = fit(alpha_guess, beta_guess)
 
         # If the fit doesn't succeed, try manually seeding with other beta values.
         if not result.success:
             best = None
             for beta in beta_candidates:
-                result = minimize(
-                    lambda params: self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, *params),
-                    [alpha_guess, beta],
-                    method="L-BFGS-B",
-                    jac=True,
-                    bounds=[
-                        (np.nextafter(1e-4, np.pi), np.nextafter(self.angular_cutoff, 0)),
-                        (1.01, 1000),
-                    ],
-                )
+                result = fit(alpha_guess, beta)
+                if result.success and (best is None or best.fun > result.fun):
+                    best = result
 
-                if result.success:
-                    if (best is None) or (best.fun > result.fun):
-                        best = result
-
-            result = best
+            if best is not None:
+                result = best
 
         # Store histogram data (pad/truncate to match storage size).
         # Make sure to rescale by the phase space to get densities.
         n_store = min(len(hist), self.dpsi_nbins)
         self.histograms[param_idx][:n_store] = hist[:n_store] / delta
         self.uncertainties[param_idx][:n_store] = np.sqrt(hist2[:n_store]) / delta
-        self.dpsi_bins[param_idx][: len(dpsi_bins)] = dpsi_bins
 
         # Store results if we found a solution
         if result.success:
@@ -513,14 +563,17 @@ class KingPSFFitter:
 
         return False
 
-    def get_interpolator(self, gamma_index: int = 0) -> Tuple[Any, Any]:
+    def get_interpolator(self, gamma_index: int = 0, extension_index: int = 0) -> tuple[Any, Any]:
         """
-        Get an interpolator for fitted parameters at a given spectral index.
+        Get an interpolator for fitted parameters at a given spectral index
+        and extension.
 
         Parameters
         ----------
         gamma_index : int, optional
             Index of the spectral index to use. Default is 0.
+        extension_index : int, optional
+            Index into extension_grid to use. Default is 0.
 
         Returns
         -------
@@ -540,27 +593,29 @@ class KingPSFFitter:
         # Create interpolators
         alpha_interp = RegularGridInterpolator(
             tuple(bin_centers),
-            self.fit_alpha[gamma_index],
+            self.fit_alpha[extension_index, gamma_index],
             method="linear",
             bounds_error=False,
-            fill_value=self.fit_alpha[gamma_index].mean(),
+            fill_value=self.fit_alpha[extension_index, gamma_index].mean(),
         )
 
         beta_interp = RegularGridInterpolator(
             tuple(bin_centers),
-            self.fit_beta[gamma_index],
+            self.fit_beta[extension_index, gamma_index],
             method="linear",
             bounds_error=False,
-            fill_value=self.fit_beta[gamma_index].mean(),
+            fill_value=self.fit_beta[extension_index, gamma_index].mean(),
         )
 
         return alpha_interp, beta_interp
 
     def plot_fit(
         self,
-        bin_indices: Union[Tuple[int, ...], Dict[str, int]],
+        bin_indices: tuple[int, ...] | dict[str, int],
         gamma_index: int = 0,
-        ax: Optional[Any] = None,
+        ax: Any | None = None,
+        *,
+        extension_index: int = 0,
     ) -> Any:
         """
         Plot the fitted King PDF for a specific bin.
@@ -574,6 +629,8 @@ class KingPSFFitter:
             Index of spectral index. Default is 0.
         ax : matplotlib.axes.Axes, optional
             Axes to plot on. If None, creates new figure.
+        extension_index : int, optional
+            Index into extension_grid to use. Default is 0.
 
         Returns
         -------
@@ -588,13 +645,13 @@ class KingPSFFitter:
         import matplotlib.pyplot as plt
 
         if ax is None:
-            fig, ax = plt.subplots(figsize=(8, 6))
+            _, ax = plt.subplots(figsize=(8, 6))
 
         # Convert dict to tuple if needed
         if isinstance(bin_indices, dict):
             bin_indices = tuple(bin_indices[key] for key in self.bin_names)
 
-        param_idx = tuple([gamma_index] + list(bin_indices))
+        param_idx = (extension_index, gamma_index) + tuple(bin_indices)
 
         # Get histogram data
         hist = self.histograms[param_idx]

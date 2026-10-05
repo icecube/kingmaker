@@ -1,7 +1,7 @@
 """Smoke tests: verify all public classes can be imported."""
 
-from kingmaker.pdf import KingPDF, TemplateSmearedKingPDF
 from kingmaker.fitting import KingPSFFitter
+from kingmaker.pdf import KingPDF, TemplateSmearedKingPDF
 from kingmaker.wrapper import KingSpatialLikelihood
 
 

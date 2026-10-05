@@ -1,7 +1,6 @@
-from typing import Union
 import numpy as np
 import numpy.typing as npt
-from numba import njit, vectorize, float32, float64
+from numba import float32, float64, njit, vectorize
 
 _log10pi: float = np.log10(np.pi)
 
@@ -12,10 +11,10 @@ _log10pi: float = np.log10(np.pi)
     cache=True,
 )
 def _unnormalized_pdf(
-    x: Union[float, npt.NDArray[np.floating]],
-    alpha: Union[float, npt.NDArray[np.floating]],
-    beta: Union[float, npt.NDArray[np.floating]],
-) -> Union[float, npt.NDArray[np.floating]]:
+    x: float | npt.NDArray[np.floating],
+    alpha: float | npt.NDArray[np.floating],
+    beta: float | npt.NDArray[np.floating],
+) -> float | npt.NDArray[np.floating]:
     """
     Evaluate the unnormalized spherical King function (without solid angle Jacobian):
         f(x) = [1 + (1 - cos x) / (alpha² * beta)]^(-beta)
@@ -43,8 +42,8 @@ def _unnormalized_pdf(
     cache=True,
 )
 def _unnormalized_cdf(
-    x: Union[float, npt.NDArray[np.floating]], alpha: float, beta: float
-) -> Union[float, npt.NDArray[np.floating]]:
+    x: float | npt.NDArray[np.floating], alpha: float, beta: float
+) -> float | npt.NDArray[np.floating]:
     """
     Evaluate the CDF of the radial King function (without solid angle Jacobian).
 
@@ -78,10 +77,10 @@ def _unnormalized_cdf(
     cache=True,
 )
 def _norm(
-    alpha: Union[float, npt.NDArray[np.floating]],
-    beta: Union[float, npt.NDArray[np.floating]],
+    alpha: float | npt.NDArray[np.floating],
+    beta: float | npt.NDArray[np.floating],
     maximum: float,
-) -> Union[float, npt.NDArray[np.floating]]:
+) -> float | npt.NDArray[np.floating]:
     """
     Compute the normalization constant for the King PDF over the sphere.
 
