@@ -345,8 +345,9 @@ class KingSpatialLikelihood:
                 "source_extensions must have the same length as source_ras and source_decs."
             )
         lo, hi = self.extension_grid[[0, -1]]
-        if np.any((source_extensions < lo - 1e-9) | (source_extensions > hi + 1e-9)):
-            raise ValueError(f"source_extensions must lie within extension_grid [{lo}, {hi}].")
+        if np.any(~np.isfinite(source_extensions)) or np.any(
+            (source_extensions < lo - 1e-9) | (source_extensions > hi + 1e-9)
+        ):
         if self.mkpdf is not None and (
             self._marg_source_decs.shape != np.shape(source_decs)
             or not np.allclose(self._marg_source_decs, source_decs)

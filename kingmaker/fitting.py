@@ -108,15 +108,19 @@ class KingPSFFitter:
         )
         self.angular_cutoff = angular_cutoff
 
-        self.extension_grid = np.sort(
-            np.atleast_1d(
-                np.asarray(
-                    extension_grid if extension_grid is not None else [0.0], dtype=np.float64
-                )
+        self.extension_grid = np.atleast_1d(
+            np.asarray(
+                extension_grid if extension_grid is not None else [0.0], dtype=np.float64
             )
         )
-        if np.any(self.extension_grid < 0):
-            raise ValueError("extension_grid contains negative values.")
+        if (
+            self.extension_grid.ndim != 1
+            or self.extension_grid.size == 0
+            or not np.all(np.isfinite(self.extension_grid))
+            or np.any(self.extension_grid < 0)
+        ):
+            raise ValueError("extension_grid must be a 1-D, finite, non-empty, non-negative array.")
+        self.extension_grid = np.sort(self.extension_grid)
 
         # Initialize King PDF
         self.king_pdf = KingPDF(angular_cutoff=angular_cutoff)
