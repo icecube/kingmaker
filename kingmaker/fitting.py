@@ -109,9 +109,7 @@ class KingPSFFitter:
         self.angular_cutoff = angular_cutoff
 
         self.extension_grid = np.atleast_1d(
-            np.asarray(
-                extension_grid if extension_grid is not None else [0.0], dtype=np.float64
-            )
+            np.asarray(extension_grid if extension_grid is not None else [0.0], dtype=np.float64)
         )
         if (
             self.extension_grid.ndim != 1
