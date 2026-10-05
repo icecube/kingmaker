@@ -9,7 +9,6 @@ from numpy.testing import assert_allclose
 
 from kingmaker.utils import angular_distance, meshgrid2d, offset_position, sample_with_extension
 
-
 # ---------------------------------------------------------------------------
 # angular_distance
 # ---------------------------------------------------------------------------

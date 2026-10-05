@@ -17,7 +17,6 @@ import kingmaker.fitting as fitting_module
 from kingmaker.fitting import KingPSFFitter
 from kingmaker.pdf import KingPDF
 
-
 RNG_SEED = 42
 
 # One shared PDF instance to avoid re-building the 200×200 norm grid per test.
@@ -194,11 +193,11 @@ class TestKingPSFFitterCorrelated:
     """
 
     # (alpha_true, beta_true, (log10_E_lo, log10_E_hi))
-    _GROUP_PARAMS = [
+    _GROUP_PARAMS = (
         (np.radians(2.0), 2.0, (3.0, 4.0)),  # low energy:  broad PSF
         (np.radians(1.0), 3.0, (4.0, 5.0)),  # mid energy
         (np.radians(0.5), 4.0, (5.0, 6.0)),  # high energy: narrow PSF
-    ]
+    )
 
     @pytest.fixture(scope="class")
     def result(self):

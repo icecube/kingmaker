@@ -1,8 +1,9 @@
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
-from tqdm import tqdm
+from typing import Any, cast
+
 import numpy as np
 import numpy.typing as npt
 from scipy.optimize import minimize
+from tqdm import tqdm
 
 from .distribution import _cdf_and_gradient
 from .pdf import KingPDF
@@ -42,7 +43,7 @@ class KingPSFFitter:
         The percentiles (ranging from 0-100) defining the range of weights to accept
         for the per-parametrization bin histogramming and fitting. Note that these are
         applied based on the weights based on sorted index value and not cumulative
-        weight value like np.percentile. Default is [0, 95],
+        weight value like np.percentile. Default is (0, 95).
     weight_field : str, optional
         Field name for oneweight. If None, equal weights are used.
     true_ra_name : str
@@ -79,18 +80,18 @@ class KingPSFFitter:
     def __init__(
         self,
         signal_events: npt.NDArray[Any],
-        parametrization_bins: Dict[str, Union[int, List, Tuple, npt.NDArray]],
+        parametrization_bins: dict[str, int | list | tuple | npt.NDArray],
         dpsi_nbins: int = 101,
         minimum_counts: int = 100,
         remove_weight_outliers=True,
-        weight_outlier_percentiles=[0, 95],
-        weight_field: Optional[str] = "ow",
+        weight_outlier_percentiles=(0, 95),
+        weight_field: str | None = "ow",
         true_ra_name: str = "trueRa",
         true_dec_name: str = "trueDec",
         true_energy_name: str = "trueE",
-        spectral_indices: Optional[Union[List[float], npt.NDArray[np.floating]]] = None,
+        spectral_indices: list[float] | npt.NDArray[np.floating] | None = None,
         angular_cutoff: float = np.pi,
-        extension_grid: Optional[Union[List[float], npt.NDArray[np.floating]]] = None,
+        extension_grid: list[float] | npt.NDArray[np.floating] | None = None,
     ) -> None:
         """Initialize the KingPSFFitter."""
         self.signal_events = signal_events
@@ -161,7 +162,7 @@ class KingPSFFitter:
         self._initialize_storage()
 
     def _validate_fields(
-        self, parametrization_bins: Dict[str, Union[int, List, Tuple, npt.NDArray]]
+        self, parametrization_bins: dict[str, int | list | tuple | npt.NDArray]
     ) -> None:
         """
         Validate that required and parameterization fields exist in signal events.
@@ -187,7 +188,7 @@ class KingPSFFitter:
         if missing_required:
             raise ValueError(f"Signal events missing required fields: {missing_required}")
 
-        missing_params = [key for key in parametrization_bins.keys() if key not in names]
+        missing_params = [key for key in parametrization_bins if key not in names]
         if missing_params:
             raise ValueError(
                 f"Parametrization fields {missing_params} not found in signal events. "
@@ -198,8 +199,8 @@ class KingPSFFitter:
             raise ValueError(f"Weight field '{self.weight_field}' not found in signal events.")
 
     def _setup_bins(
-        self, parametrization_bins: Dict[str, Union[int, List, Tuple, npt.NDArray]]
-    ) -> Dict[str, npt.NDArray[np.floating]]:
+        self, parametrization_bins: dict[str, int | list | tuple | npt.NDArray]
+    ) -> dict[str, npt.NDArray[np.floating]]:
         """
         Convert binning specifications to explicit bin edges.
 
@@ -221,7 +222,7 @@ class KingPSFFitter:
             elif isinstance(val, (tuple, list, np.ndarray)):
                 bins_dict[key] = np.asarray(val)
             else:
-                raise ValueError(
+                raise TypeError(
                     f"Unknown binning specification for '{key}': {val}. "
                     "Use int for number of bins or array-like for bin edges."
                 )
@@ -231,7 +232,7 @@ class KingPSFFitter:
         self,
         nbins: int,
         values: npt.NDArray[np.floating],
-        weights: Optional[npt.NDArray[np.floating]] = None,
+        weights: npt.NDArray[np.floating] | None = None,
     ) -> npt.NDArray[np.floating]:
         """
         Create bins with approximately equal number of (weighted) events.
@@ -272,7 +273,7 @@ class KingPSFFitter:
 
         return bin_edges
 
-    def _bin_events(self) -> Dict[str, npt.NDArray[np.integer]]:
+    def _bin_events(self) -> dict[str, npt.NDArray[np.integer]]:
         """
         Assign each event to a bin index for each parameterization dimension.
 
@@ -305,8 +306,8 @@ class KingPSFFitter:
         self.event_counts = np.zeros(shape, dtype=int)
 
     def fit_all_bins(
-        self, verbose: bool = True, rng: Optional[np.random.Generator] = None
-    ) -> Dict[str, npt.NDArray]:
+        self, verbose: bool = True, rng: np.random.Generator | None = None
+    ) -> dict[str, npt.NDArray]:
         """
         Fit King PSF parameters in all bins.
 
@@ -466,7 +467,7 @@ class KingPSFFitter:
         self,
         masked_dpsi: npt.NDArray[np.floating],
         masked_weights: npt.NDArray[np.floating],
-        param_idx: Tuple[int, ...],
+        param_idx: tuple[int, ...],
     ) -> bool:
         """
         Fit King parameters for a single bin.
@@ -541,9 +542,8 @@ class KingPSFFitter:
             best = None
             for beta in beta_candidates:
                 result = fit(alpha_guess, beta)
-                if result.success:
-                    if (best is None) or (best.fun > result.fun):
-                        best = result
+                if result.success and (best is None or best.fun > result.fun):
+                    best = result
 
             if best is not None:
                 result = best
@@ -563,7 +563,7 @@ class KingPSFFitter:
 
         return False
 
-    def get_interpolator(self, gamma_index: int = 0, extension_index: int = 0) -> Tuple[Any, Any]:
+    def get_interpolator(self, gamma_index: int = 0, extension_index: int = 0) -> tuple[Any, Any]:
         """
         Get an interpolator for fitted parameters at a given spectral index
         and extension.
@@ -611,10 +611,10 @@ class KingPSFFitter:
 
     def plot_fit(
         self,
-        bin_indices: Union[Tuple[int, ...], Dict[str, int]],
+        bin_indices: tuple[int, ...] | dict[str, int],
         gamma_index: int = 0,
         extension_index: int = 0,
-        ax: Optional[Any] = None,
+        ax: Any | None = None,
     ) -> Any:
         """
         Plot the fitted King PDF for a specific bin.
@@ -644,7 +644,7 @@ class KingPSFFitter:
         import matplotlib.pyplot as plt
 
         if ax is None:
-            fig, ax = plt.subplots(figsize=(8, 6))
+            _, ax = plt.subplots(figsize=(8, 6))
 
         # Convert dict to tuple if needed
         if isinstance(bin_indices, dict):

@@ -12,9 +12,8 @@ import numpy as np
 import pytest
 
 from kingmaker.pdf import KingPDF
-from kingmaker.utils import angular_distance, _interp1d
+from kingmaker.utils import _interp1d, angular_distance
 from kingmaker.wrapper import KingSpatialLikelihood, _nearest_index
-
 
 SPECTRAL_INDICES = np.array([1.0, 2.0, 3.0])
 BIN_EDGES = np.array([0.0, 1.0, 2.0, 3.0])  # bin centers: 0.5, 1.5, 2.5
@@ -87,7 +86,10 @@ def _make_multi_ext_likelihood(tmp_path, angular_cutoff=np.pi, extension_grid=No
     )
 
 
-def _make_events(n_per_bin, rng, offset_scale=np.radians(2.0)):
+OFFSET_SCALE = np.radians(2.0)
+
+
+def _make_events(n_per_bin, rng, offset_scale=OFFSET_SCALE):
     """n_per_bin events at each of the 3 known bin centers (0.5, 1.5, 2.5),
     at small random offsets from a source at (ra=0, dec=0)."""
     aux_centers = [0.5, 1.5, 2.5]
@@ -507,13 +509,13 @@ class TestSourceExtensions:
             )
 
 
-MARG_KWARGS = dict(
-    enable_marginalization=True,
-    marginalization_points_alpha=np.radians([0.5, 2.0]),
-    marginalization_points_beta=np.array([1.5, 3.5]),
-    marginalization_n_signed_delta_dec=10,
-    marginalization_n_ra_bins=10,
-)
+MARG_KWARGS = {
+    "enable_marginalization": True,
+    "marginalization_points_alpha": np.radians([0.5, 2.0]),
+    "marginalization_points_beta": np.array([1.5, 3.5]),
+    "marginalization_n_signed_delta_dec": 10,
+    "marginalization_n_ra_bins": 10,
+}
 
 
 class TestMarginalizationSourceDecs:

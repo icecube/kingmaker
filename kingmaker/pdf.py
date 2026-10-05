@@ -1,13 +1,13 @@
-from typing import Optional, Tuple, Union, cast
+from typing import cast
+
+import healpy as hp
 import numpy as np
 import numpy.typing as npt
-import healpy as hp
 from scipy.interpolate import interpn
 from scipy.sparse import csr_array
 from scipy.special import legendre_p_all, sph_harm_y_all
 
-from .distribution import _log10pi
-from .distribution import _norm, _unnormalized_pdf, _unnormalized_cdf
+from .distribution import _log10pi, _norm, _unnormalized_cdf, _unnormalized_pdf
 from .utils import _build_marginalized_grid, angular_distance
 
 
@@ -34,9 +34,9 @@ class KingPDF:
 
     def norm(
         self,
-        alpha: Union[float, npt.NDArray[np.floating]],
-        beta: Union[float, npt.NDArray[np.floating]],
-    ) -> Union[float, npt.NDArray[np.floating]]:
+        alpha: float | npt.NDArray[np.floating],
+        beta: float | npt.NDArray[np.floating],
+    ) -> float | npt.NDArray[np.floating]:
         """
         Compute the normalization constant for given King parameters.
 
@@ -56,11 +56,11 @@ class KingPDF:
 
     def pdf_from_norm(
         self,
-        x: Union[float, npt.NDArray[np.floating]],
-        alpha: Union[float, npt.NDArray[np.floating]],
-        beta: Union[float, npt.NDArray[np.floating]],
-        norm: Union[float, npt.NDArray[np.floating]],
-    ) -> Union[float, npt.NDArray[np.floating]]:
+        x: float | npt.NDArray[np.floating],
+        alpha: float | npt.NDArray[np.floating],
+        beta: float | npt.NDArray[np.floating],
+        norm: float | npt.NDArray[np.floating],
+    ) -> float | npt.NDArray[np.floating]:
         """
         Evaluate the King kernel given a precomputed normalization constant.
 
@@ -92,10 +92,10 @@ class KingPDF:
 
     def pdf(
         self,
-        x: Union[float, npt.NDArray[np.floating]],
-        alpha: Union[float, npt.NDArray[np.floating]],
-        beta: Union[float, npt.NDArray[np.floating]],
-    ) -> Union[float, npt.NDArray[np.floating]]:
+        x: float | npt.NDArray[np.floating],
+        alpha: float | npt.NDArray[np.floating],
+        beta: float | npt.NDArray[np.floating],
+    ) -> float | npt.NDArray[np.floating]:
         """
         Evaluate the normalized King PDF at given angular separation(s).
 
@@ -117,11 +117,10 @@ class KingPDF:
             Normalized PDF value(s) with units of probability/steradian.
         """
         # Scalar-like: check if we can shortcut using the angular cutoff.
-        if np.isscalar(x) and (x > self.angular_cutoff):  # type: ignore[operator]
+        if (np.isscalar(x) and (x > self.angular_cutoff)) or (  # type: ignore[operator]
+            isinstance(x, np.ndarray) and x.size == 1 and float(x.flat[0]) > self.angular_cutoff
+        ):
             return 0
-        elif isinstance(x, np.ndarray) and x.size == 1:
-            if float(x.flat[0]) > self.angular_cutoff:
-                return 0
 
         if np.any(alpha <= 0):
             raise ValueError("Received alpha <= 0. The King distribution is not defined here.")
@@ -145,10 +144,10 @@ class KingPDF:
 
     def cdf(
         self,
-        x: Union[float, npt.NDArray[np.floating]],
-        alpha: Union[float, npt.NDArray[np.floating]],
-        beta: Union[float, npt.NDArray[np.floating]],
-    ) -> Union[float, npt.NDArray[np.floating]]:
+        x: float | npt.NDArray[np.floating],
+        alpha: float | npt.NDArray[np.floating],
+        beta: float | npt.NDArray[np.floating],
+    ) -> float | npt.NDArray[np.floating]:
         """
         Evaluate the normalized King CDF at given angular separation(s).
 
@@ -173,9 +172,8 @@ class KingPDF:
         if np.isscalar(x):
             if x > self.angular_cutoff:  # type: ignore[operator]
                 return 1
-        elif isinstance(x, np.ndarray) and x.size == 1:
-            if float(x.flat[0]) > self.angular_cutoff:
-                return 1
+        elif isinstance(x, np.ndarray) and x.size == 1 and float(x.flat[0]) > self.angular_cutoff:
+            return 1
 
         if np.any(alpha <= 0):
             raise ValueError(
@@ -206,7 +204,7 @@ class KingPDF:
         n: int,
         alpha: float,
         beta: float,
-        rng: Optional[np.random.Generator] = None,
+        rng: np.random.Generator | None = None,
         n_grid: int = 10000,
     ) -> npt.NDArray[np.floating]:
         """
@@ -253,7 +251,7 @@ class KingPDF:
         alpha: npt.NDArray[np.floating],
         beta: npt.NDArray[np.floating],
         *,
-        mask: Optional[csr_array] = None,
+        mask: csr_array | None = None,
     ) -> csr_array:
         """
         Evaluate the King PDF for all (event, source) pairs and return a sparse matrix.
@@ -396,10 +394,10 @@ class MarginalizedKingPDF:
     def __init__(
         self,
         *,
-        source_declination: Union[list, npt.NDArray[np.floating]],
+        source_declination: list | npt.NDArray[np.floating],
         angular_cutoff: float = np.pi,
-        points_alpha: Optional[npt.NDArray[np.floating]] = None,
-        points_beta: Optional[npt.NDArray[np.floating]] = None,
+        points_alpha: npt.NDArray[np.floating] | None = None,
+        points_beta: npt.NDArray[np.floating] | None = None,
         n_signed_delta_dec: int = 200,
         n_ra_bins: int = 100,
     ) -> None:
@@ -480,9 +478,9 @@ class MarginalizedKingPDF:
 
     def pdf(
         self,
-        x: Union[float, npt.NDArray[np.floating]],
-        alpha: Union[float, npt.NDArray[np.floating]],
-        beta: Union[float, npt.NDArray[np.floating]],
+        x: float | npt.NDArray[np.floating],
+        alpha: float | npt.NDArray[np.floating],
+        beta: float | npt.NDArray[np.floating],
         source_dec: float,
     ) -> npt.NDArray[np.floating]:
         """
@@ -557,7 +555,7 @@ class MarginalizedKingPDF:
         alpha: npt.NDArray[np.floating],
         beta: npt.NDArray[np.floating],
         *,
-        mask: Optional[csr_array] = None,
+        mask: csr_array | None = None,
     ) -> csr_array:
         """
         Evaluate the RA-marginalized King PDF for every (event, source) pair.
@@ -726,12 +724,12 @@ class TemplateSmearedKingPDF(KingPDF):
         self,
         skymap: npt.NDArray[np.floating],
         *,
-        eval_decs: Optional[Union[float, npt.NDArray[np.floating]]] = None,
-        eval_ras: Optional[Union[float, npt.NDArray[np.floating]]] = None,
+        eval_decs: float | npt.NDArray[np.floating] | None = None,
+        eval_ras: float | npt.NDArray[np.floating] | None = None,
         angular_cutoff: float = np.pi,
-        points_alpha: npt.NDArray[np.floating] = np.logspace(-4, _log10pi + 1e-2, 100),
-        points_beta: npt.NDArray[np.floating] = np.nextafter(np.logspace(0, 1, 100), np.inf),
-        lmax: Optional[int] = None,
+        points_alpha: npt.NDArray[np.floating] | None = None,
+        points_beta: npt.NDArray[np.floating] | None = None,
+        lmax: int | None = None,
         interpolation_method: str = "nearest",
         memory_limit_gb: float = 1.0,
     ) -> None:
@@ -744,6 +742,10 @@ class TemplateSmearedKingPDF(KingPDF):
 
         super().__init__(angular_cutoff=angular_cutoff)
 
+        if points_alpha is None:
+            points_alpha = np.logspace(-4, _log10pi + 1e-2, 100)
+        if points_beta is None:
+            points_beta = np.nextafter(np.logspace(0, 1, 100), np.inf)
         if np.any(points_alpha <= 0):
             raise ValueError(
                 "Received points_alpha containing at least one point <= 0. The"
@@ -805,8 +807,8 @@ class TemplateSmearedKingPDF(KingPDF):
 
     def set_coordinates(
         self,
-        eval_decs: Union[float, npt.NDArray[np.floating]],
-        eval_ras: Union[float, npt.NDArray[np.floating]],
+        eval_decs: float | npt.NDArray[np.floating],
+        eval_ras: float | npt.NDArray[np.floating],
     ) -> None:
         """
         Set evaluation coordinates and pre-compute spherical harmonics.
@@ -1015,9 +1017,7 @@ class TemplateSmearedKingPDF(KingPDF):
         harmonic_convolution = hp.almxfl(alm=self.skymap_alm, fl=b_l, mmax=self.mmax, inplace=False)
         return hp.alm2map(harmonic_convolution, nside=self.nside, lmax=self.lmax, mmax=self.mmax)
 
-    def convolve_at_grid_point(
-        self, alpha: float, beta: float
-    ) -> Union[float, npt.NDArray[np.floating]]:
+    def convolve_at_grid_point(self, alpha: float, beta: float) -> float | npt.NDArray[np.floating]:
         """
         Evaluate convolved PDF only at pre-set grid points (eval_decs, eval_ras).
 
@@ -1055,9 +1055,9 @@ class TemplateSmearedKingPDF(KingPDF):
         n: int,
         alpha: float,
         beta: float,
-        rng: Optional[np.random.Generator] = None,
+        rng: np.random.Generator | None = None,
         n_grid: int = 10000,
-    ) -> Tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+    ) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
         """
         Sample reconstructed positions from the PSF-convolved template skymap.
 

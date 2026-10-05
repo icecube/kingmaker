@@ -1,4 +1,3 @@
-from typing import Optional, Tuple, Union
 import numpy as np
 import numpy.typing as npt
 from numba import njit, prange
@@ -72,11 +71,11 @@ def _interp1d_order2(
 
 @njit(cache=True)
 def angular_distance(
-    src_ra: Union[float, npt.NDArray[np.floating]],
-    src_dec: Union[float, npt.NDArray[np.floating]],
-    ra: Union[float, npt.NDArray[np.floating]],
-    dec: Union[float, npt.NDArray[np.floating]],
-) -> Union[float, npt.NDArray[np.floating]]:
+    src_ra: float | npt.NDArray[np.floating],
+    src_dec: float | npt.NDArray[np.floating],
+    ra: float | npt.NDArray[np.floating],
+    dec: float | npt.NDArray[np.floating],
+) -> float | npt.NDArray[np.floating]:
     """
     Calculate angular distance on the sphere using the haversine formula.
 
@@ -104,11 +103,11 @@ def angular_distance(
 
 
 def offset_position(
-    ra: Union[float, npt.NDArray[np.floating]],
-    dec: Union[float, npt.NDArray[np.floating]],
-    distance: Union[float, npt.NDArray[np.floating]],
-    bearing: Union[float, npt.NDArray[np.floating]],
-) -> Tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+    ra: float | npt.NDArray[np.floating],
+    dec: float | npt.NDArray[np.floating],
+    distance: float | npt.NDArray[np.floating],
+    bearing: float | npt.NDArray[np.floating],
+) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
     """
     Move (ra, dec) by an angular distance along a bearing on the sphere.
 
@@ -141,11 +140,11 @@ def offset_position(
 
 
 def sample_with_extension(
-    true_ra: Union[float, npt.NDArray[np.floating]],
-    true_dec: Union[float, npt.NDArray[np.floating]],
-    extension: Union[float, npt.NDArray[np.floating]],
-    rng: Optional[np.random.Generator] = None,
-) -> Tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+    true_ra: float | npt.NDArray[np.floating],
+    true_dec: float | npt.NDArray[np.floating],
+    extension: float | npt.NDArray[np.floating],
+    rng: np.random.Generator | None = None,
+) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
     """
     Sample a position offset from (true_ra, true_dec) by a Rayleigh(extension)
     magnitude at a uniformly random bearing, simulating a source's angular extent.
@@ -205,7 +204,7 @@ def _pre_mask_and_distance(
     src_ra: npt.NDArray[np.floating],
     src_dec: npt.NDArray[np.floating],
     cutoff: float,
-) -> Tuple[npt.NDArray[np.intp], npt.NDArray[np.intp], npt.NDArray[np.float64]]:
+) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.intp], npt.NDArray[np.float64]]:
     """Rectangular pre-filter and haversine for one or more sources, returned ready
     for input into a sparse array.
 
@@ -421,7 +420,7 @@ def _build_marginalized_grid(
 @njit(cache=True)
 def meshgrid2d(
     a: npt.NDArray[np.floating], b: npt.NDArray[np.floating]
-) -> Tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
     """
     Create a 2D meshgrid from 1D coordinate arrays, compatible with numba JIT compilation.
 
