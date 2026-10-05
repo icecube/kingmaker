@@ -150,10 +150,13 @@ class KingSpatialLikelihood:
         self.extension_grid = np.atleast_1d(fitted_parameters["extension_grid"]).astype(np.float64)
         if (
             self.extension_grid.ndim != 1
+            or self.extension_grid.size == 0
             or not np.all(np.isfinite(self.extension_grid))
             or np.any(self.extension_grid < 0)
         ):
-            raise ValueError("extension_grid must be a 1-D, finite, non-negative array of radians.")
+            raise ValueError(
+                "extension_grid must be a 1-D, finite, non-empty, non-negative array of radians."
+            )
         if np.any(np.diff(self.extension_grid) < 0):
             raise ValueError(f"Cache {cache_name!r} extension_grid is not sorted.")
         if extension_grid is not None:

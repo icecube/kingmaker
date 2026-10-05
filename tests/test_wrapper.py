@@ -508,6 +508,24 @@ class TestSourceExtensions:
                 cache_name=str(cache_path),
             )
 
+    def test_empty_extension_grid_raises(self, tmp_path):
+        cache_path = tmp_path / "empty_ext.npz"
+        np.savez(
+            cache_path,
+            parametrization_bins=np.array({"aux": BIN_EDGES}, dtype=object),
+            alpha=MULTI_EXT_ALPHA_VALUES[:0],
+            beta=MULTI_EXT_BETA_VALUES[:0],
+            extension_grid=np.array([]),
+        )
+        with pytest.raises(ValueError, match="non-empty"):
+            KingSpatialLikelihood(
+                signal_events=np.empty(0),
+                parametrization_bins={"aux": 3},
+                spectral_indices=SPECTRAL_INDICES,
+                cache_parameters=True,
+                cache_name=str(cache_path),
+            )
+
 
 MARG_KWARGS = {
     "enable_marginalization": True,

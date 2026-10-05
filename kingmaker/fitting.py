@@ -613,8 +613,9 @@ class KingPSFFitter:
         self,
         bin_indices: tuple[int, ...] | dict[str, int],
         gamma_index: int = 0,
-        extension_index: int = 0,
         ax: Any | None = None,
+        *,
+        extension_index: int = 0,
     ) -> Any:
         """
         Plot the fitted King PDF for a specific bin.
@@ -626,10 +627,10 @@ class KingPSFFitter:
             mapping bin names to indices.
         gamma_index : int, optional
             Index of spectral index. Default is 0.
-        extension_index : int, optional
-            Index into extension_grid to use. Default is 0.
         ax : matplotlib.axes.Axes, optional
             Axes to plot on. If None, creates new figure.
+        extension_index : int, optional
+            Index into extension_grid to use. Default is 0.
 
         Returns
         -------
