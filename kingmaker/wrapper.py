@@ -12,6 +12,14 @@ from .fitting import KingPSFFitter
 from .utils import _pre_mask_and_distance, _interp1d
 
 
+def _nearest_index(centers, values):
+    """Index of the nearest center for each value."""
+    if len(centers) == 1:
+        return np.zeros(np.shape(values), dtype=np.intp)
+    i = np.searchsorted(centers, values).clip(1, len(centers) - 1)
+    return np.where(values - centers[i - 1] < centers[i] - values, i - 1, i)
+
+
 class KingSpatialLikelihood:
     """Wrapper class to encapsulate King distribution functionality, including PDF evaluation and parameter fitting.
     This class provides a unified interface for working with King distributions, allowing users to easily fit simulation
@@ -142,20 +150,30 @@ class KingSpatialLikelihood:
         # Extension grid (bin-center-style values, nearest-snapped per source).
         if "extension_grid" not in fitted_parameters:
             raise ValueError(f"Cache {cache_name!r} has no extension_grid. Delete it and refit.")
-        self.extension_grid = np.sort(
-            np.atleast_1d(fitted_parameters["extension_grid"]).astype(np.float64)
-        )
-        if self.extension_grid.ndim != 1 or not np.all(np.isfinite(self.extension_grid)) or np.any(
-            self.extension_grid < 0
+        self.extension_grid = np.atleast_1d(fitted_parameters["extension_grid"]).astype(np.float64)
+        if (
+            self.extension_grid.ndim != 1
+            or not np.all(np.isfinite(self.extension_grid))
+            or np.any(self.extension_grid < 0)
         ):
             raise ValueError("extension_grid must be a 1-D, finite, non-negative array of radians.")
+        if np.any(np.diff(self.extension_grid) < 0):
+            raise ValueError(f"Cache {cache_name!r} extension_grid is not sorted.")
+        if extension_grid is not None:
+            requested = np.sort(np.atleast_1d(np.asarray(extension_grid, dtype=np.float64)))
+            if requested.shape != self.extension_grid.shape or not np.allclose(
+                requested, self.extension_grid
+            ):
+                raise ValueError(
+                    f"Cache {cache_name!r} has extension_grid {self.extension_grid}, "
+                    f"not {requested}. Delete it and refit."
+                )
 
         # And grab the fitted alpha/beta arrays, shape (n_extension, n_gamma, *bins).
         self.alpha_values = fitted_parameters["alpha"]
         self.beta_values = fitted_parameters["beta"]
-        if self.alpha_values.shape[0] != len(self.extension_grid) or self.beta_values.shape[0] != len(
-            self.extension_grid
-        ):
+        n_ext = len(self.extension_grid)
+        if self.alpha_values.shape[0] != n_ext or self.beta_values.shape[0] != n_ext:
             raise ValueError(
                 "Cached alpha/beta first axis must match extension_grid length. Delete the cache and refit."
             )
@@ -237,7 +255,9 @@ class KingSpatialLikelihood:
             if source_extensions is None
             else np.asarray(source_extensions, dtype=np.float64)
         )
-        if self.source_extensions is None or not np.array_equal(self.source_extensions, expected_ext):
+        if self.source_extensions is None or not np.array_equal(
+            self.source_extensions, expected_ext
+        ):
             return False
         return np.array_equal(self.source_ras, source_ras) and np.array_equal(
             self.source_decs, source_decs
@@ -275,16 +295,17 @@ class KingSpatialLikelihood:
             Source declination(s) in radians. Must have the same length as
             ``source_ras``.
         source_extensions : ndarray, optional
-            Source extension radii in radians, nearest-snapped to the fitted
-            ``extension_grid``. Defaults to zero (point source) for every
-            source. If marginalization is enabled, ``marginalization_source_decs``
-            must correspond 1:1 with these sources.
+            Source extension widths (Gaussian sigma) in radians, nearest-snapped
+            to the fitted ``extension_grid`` and within its range. Defaults to
+            zero (point source) for every source.
 
         Raises
         ------
         ValueError
-            If ``source_ras``/``source_decs`` are not provided, or their
-            lengths do not match.
+            If ``source_ras``/``source_decs`` are missing or differ in length,
+            ``source_extensions`` has the wrong length or lies outside
+            ``extension_grid``, or ``source_decs`` differ from
+            ``marginalization_source_decs``.
 
         Notes
         -----
@@ -295,10 +316,6 @@ class KingSpatialLikelihood:
             source_ras, source_decs, source_extensions
         ):
             return
-
-        self.events = events
-        self.source_ras = source_ras
-        self.source_decs = source_decs
 
         # Make sure we have a matching number of source_ras and source_decs if we're given multiple sources.
         if (source_ras is None) and (source_decs is None):
@@ -318,16 +335,31 @@ class KingSpatialLikelihood:
             )
             self.multiple_source_warning_logged = True
 
-        self.source_extensions = (
+        source_extensions = (
             np.zeros(len(source_ras))
             if source_extensions is None
             else np.asarray(source_extensions, dtype=np.float64)
         )
-        if len(self.source_extensions) != len(source_ras):
+        if len(source_extensions) != len(source_ras):
             raise ValueError(
                 "source_extensions must have the same length as source_ras and source_decs."
             )
-        ext_idx_per_source = self._nearest_extension_index(self.source_extensions)
+        lo, hi = self.extension_grid[[0, -1]]
+        if np.any((source_extensions < lo - 1e-9) | (source_extensions > hi + 1e-9)):
+            raise ValueError(f"source_extensions must lie within extension_grid [{lo}, {hi}].")
+        if self.mkpdf is not None and (
+            self._marg_source_decs.shape != np.shape(source_decs)
+            or not np.allclose(self._marg_source_decs, source_decs)
+        ):
+            raise ValueError(
+                "marginalization_source_decs must match the source_decs passed to set_events."
+            )
+
+        self.events = None
+        self.source_ras = source_ras
+        self.source_decs = source_decs
+        self.source_extensions = source_extensions
+        ext_idx_per_source = _nearest_index(self.extension_grid, source_extensions)
 
         # Calculate the (event, source) angular distances via a single compiled
         # pass that pre-filters on a dec/RA bounding box before the haversine,
@@ -375,18 +407,12 @@ class KingSpatialLikelihood:
                 )
             )
 
-        # Marginalized path: marg_source_decs is assumed to correspond 1:1 with
-        # source_ras/source_decs/source_extensions.
         if self.mkpdf is not None:
-            if len(self._marg_source_decs) != len(source_ras):
-                raise ValueError(
-                    "marginalization_source_decs must have the same length as "
-                    "source_ras/source_decs/source_extensions passed to set_events."
-                )
             all_alpha_full, all_beta_full = self._lookup_all_events_grid(events)
 
             unique_ext = np.unique(ext_idx_per_source)
             group_source_idx = [np.flatnonzero(ext_idx_per_source == e) for e in unique_ext]
+            # Same sparsity for every gamma.
             group_masks: List[Optional[csr_array]] = [None] * len(unique_ext)
 
             self._marg_matrices = []
@@ -416,15 +442,8 @@ class KingSpatialLikelihood:
                         dtype=np.float64,
                     )
                 )
+        self.events = events
         return
-
-    def _nearest_extension_index(self, source_extensions):
-        """Nearest-bin lookup of extension_grid index for each source."""
-        centers = self.extension_grid
-        if len(centers) == 1:
-            return np.zeros(len(source_extensions), dtype=np.intp)
-        i = np.searchsorted(centers, source_extensions).clip(1, len(centers) - 1)
-        return np.where(source_extensions - centers[i - 1] < centers[i] - source_extensions, i - 1, i)
 
     def _lookup_event_grid(self, events):
         """
@@ -434,13 +453,8 @@ class KingSpatialLikelihood:
         Shared by :meth:`get_alpha_beta` and :meth:`set_events` so the
         nearest-bin index computation is only ever done once per call.
         """
-
-        def index(centers, values):
-            i = np.searchsorted(centers, values).clip(1, len(centers) - 1)
-            return np.where(values - centers[i - 1] < centers[i] - values, i - 1, i)
-
         event_indices = tuple(
-            index(self.bin_centers[i], events[key][self.event_mask])
+            _nearest_index(self.bin_centers[i], events[key][self.event_mask])
             for i, key in enumerate(self.keys)
         )
 
@@ -461,13 +475,8 @@ class KingSpatialLikelihood:
         alpha : ndarray, shape (n_extension, n_gamma, n_events)
         beta  : ndarray, shape (n_extension, n_gamma, n_events)
         """
-
-        def index(centers, values):
-            i = np.searchsorted(centers, values).clip(1, len(centers) - 1)
-            return np.where(values - centers[i - 1] < centers[i] - values, i - 1, i)
-
         event_indices = tuple(
-            index(self.bin_centers[i], events[key]) for i, key in enumerate(self.keys)
+            _nearest_index(self.bin_centers[i], events[key]) for i, key in enumerate(self.keys)
         )
         idx = (slice(None), slice(None), *event_indices)
         return self.alpha_values[idx], self.beta_values[idx]
@@ -497,7 +506,7 @@ class KingSpatialLikelihood:
         alpha, beta, _ = self._lookup_event_grid(events)
         return alpha[extension_index], beta[extension_index]
 
-    def get_alpha_beta_gamma(self, gamma, events=None, alpha=None, beta=None):
+    def get_alpha_beta_gamma(self, gamma, events=None, alpha=None, beta=None, extension_index=0):
         """
         Get alpha/beta at a given spectral index, interpolating if necessary.
 
@@ -521,6 +530,8 @@ class KingSpatialLikelihood:
         beta : ndarray, optional
             Pre-computed beta values for all spectral indices, matching
             ``alpha``.
+        extension_index : int, optional
+            Index into ``extension_grid`` used with ``events``. Default is 0.
 
         Returns
         -------
@@ -531,7 +542,7 @@ class KingSpatialLikelihood:
         """
         if alpha is None:
             assert events is not None
-            alpha, beta = self.get_alpha_beta(events)
+            alpha, beta = self.get_alpha_beta(events, extension_index)
         assert len(alpha) == len(beta)
 
         # If we have this gamma, just return it. Make sure to use copy()

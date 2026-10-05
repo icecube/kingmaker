@@ -54,6 +54,7 @@ jobs:
           - test_template_smeared_king_pdf
           - test_utils
           - test_fitting
+          - test_wrapper
 
     steps:
       - name: Checkout code

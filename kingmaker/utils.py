@@ -31,10 +31,11 @@ def _interp1d(x: float, xlow: float, xhigh: float, ylow: float, yhigh: float) ->
     """
     return ylow + (yhigh - ylow) / (xhigh - xlow) * (x - xlow)
 
+
 @njit(cache=True)
-def _interp1d_order2(x: float,
-                     xlow: float, xnearest: float, xhigh: float,
-                     ylow: float, ynearest: float, yhigh: float) -> float:
+def _interp1d_order2(
+    x: float, xlow: float, xnearest: float, xhigh: float, ylow: float, ynearest: float, yhigh: float
+) -> float:
     """
     Perform 1D order-2 interpolation.
 
@@ -62,13 +63,12 @@ def _interp1d_order2(x: float,
     """
     # np.linalg.solve solves Ax = B. We'll use that
     # to get the coefficients in y = a x**2 + b * x + c.
-    A = np.array([[xlow**2, xnearest**2, xhigh**2],
-                  [xlow,    xnearest,    xhigh],
-                  [1,       1,           1]])
+    A = np.array([[xlow**2, xnearest**2, xhigh**2], [xlow, xnearest, xhigh], [1, 1, 1]])
     B = np.array([ylow, ynearest, yhigh])
     coeffs = np.linalg.solve(A, B)
 
     return np.dot(coeffs, np.array([x**2, x, 1]))
+
 
 @njit(cache=True)
 def angular_distance(
@@ -103,6 +103,43 @@ def angular_distance(
     return np.arccos(np.minimum(np.maximum(cosDist, -1.0), 1.0))  # type: ignore[no-any-return]
 
 
+def offset_position(
+    ra: Union[float, npt.NDArray[np.floating]],
+    dec: Union[float, npt.NDArray[np.floating]],
+    distance: Union[float, npt.NDArray[np.floating]],
+    bearing: Union[float, npt.NDArray[np.floating]],
+) -> Tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+    """
+    Move (ra, dec) by an angular distance along a bearing on the sphere.
+
+    Parameters
+    ----------
+    ra, dec : float or ndarray
+        Starting position(s) in radians.
+    distance : float or ndarray
+        Angular distance(s) to move, in radians.
+    bearing : float or ndarray
+        Bearing(s) in radians, measured from north towards increasing ra.
+
+    Returns
+    -------
+    ra, dec : ndarray
+        Offset positions in radians.
+    """
+    sin_dec = np.sin(dec)
+    cos_dec = np.cos(dec)
+    sin_d = np.sin(distance)
+    cos_d = np.cos(distance)
+
+    sin_dec2 = np.clip(sin_dec * cos_d + cos_dec * sin_d * np.cos(bearing), -1.0, 1.0)
+    new_dec = np.arcsin(sin_dec2)
+    new_ra = np.mod(
+        ra + np.arctan2(np.sin(bearing) * sin_d * cos_dec, cos_d - sin_dec * sin_dec2),
+        2 * np.pi,
+    )
+    return new_ra, new_dec
+
+
 def sample_with_extension(
     true_ra: Union[float, npt.NDArray[np.floating]],
     true_dec: Union[float, npt.NDArray[np.floating]],
@@ -133,19 +170,7 @@ def sample_with_extension(
     true_ra, true_dec, extension = np.broadcast_arrays(true_ra, true_dec, extension)
     d = rng.rayleigh(extension)
     theta = rng.uniform(0, 2 * np.pi, size=np.shape(d))
-
-    sin_dec = np.sin(true_dec)
-    cos_dec = np.cos(true_dec)
-    sin_d = np.sin(d)
-    cos_d = np.cos(d)
-
-    sin_dec2 = np.clip(sin_dec * cos_d + cos_dec * sin_d * np.cos(theta), -1.0, 1.0)
-    dec = np.arcsin(sin_dec2)
-    ra = np.mod(
-        true_ra + np.arctan2(np.sin(theta) * sin_d * cos_dec, cos_d - sin_dec * sin_dec2),
-        2 * np.pi,
-    )
-    return ra, dec
+    return offset_position(true_ra, true_dec, d, theta)
 
 
 @njit(cache=True)

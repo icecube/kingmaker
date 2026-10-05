@@ -6,7 +6,7 @@ from scipy.optimize import minimize
 
 from .distribution import _cdf_and_gradient
 from .pdf import KingPDF
-from .utils import angular_distance, sample_with_extension
+from .utils import angular_distance, offset_position
 
 
 class KingPSFFitter:
@@ -56,12 +56,9 @@ class KingPSFFitter:
     angular_cutoff : float, optional
         Maximum angular separation for King PDF. Default is pi.
     extension_grid : array-like, optional
-        Source extension radii in radians, non-negative. Each event's true
-        position is displaced by a Rayleigh(extension)-magnitude offset
-        before computing dpsi. Default is [0.0], the point-source case.
-    rng : np.random.Generator, optional
-        Random number generator for the extension smearing draws. Defaults
-        to a fixed seed so repeated fits reproduce the same result.
+        Source extension widths (Gaussian sigma) in radians, non-negative.
+        Each event's true position is displaced by a Rayleigh(extension)-magnitude
+        offset before computing dpsi. Default is [0.0], the point-source case.
 
     Attributes
     ----------
@@ -113,7 +110,9 @@ class KingPSFFitter:
 
         self.extension_grid = np.sort(
             np.atleast_1d(
-                np.asarray(extension_grid if extension_grid is not None else [0.0], dtype=np.float64)
+                np.asarray(
+                    extension_grid if extension_grid is not None else [0.0], dtype=np.float64
+                )
             )
         )
         if np.any(self.extension_grid < 0):
@@ -176,6 +175,8 @@ class KingPSFFitter:
             If required fields are missing.
         """
         required_fields = ["ra", "dec", self.true_ra_name, self.true_dec_name]
+        if self.weight_field is not None:
+            required_fields.append(self.true_energy_name)
         if hasattr(self.signal_events, "dtype"):
             names = self.signal_events.dtype.names or ()
         else:
@@ -288,7 +289,10 @@ class KingPSFFitter:
         shape = [len(self.extension_grid), len(self.spectral_indices)] + self.parametrization_shape
 
         # Fit parameters
-        self.fit_alpha = np.full(shape, self._alpha_guess)
+        rayleigh_median = self.extension_grid * np.sqrt(2 * np.log(2))
+        alpha_fallback = np.hypot(self._alpha_guess, rayleigh_median)
+        self.fit_alpha = np.empty(shape)
+        self.fit_alpha[...] = alpha_fallback.reshape(-1, *[1] * (len(shape) - 1))
         self.fit_beta = np.full(shape, 2.25)
 
         # Diagnostics
@@ -355,6 +359,7 @@ class KingPSFFitter:
                 self._bin_boundaries[flat_idx] : self._bin_boundaries[flat_idx + 1]
             ]
             if len(event_idx) == 0:
+                n_skipped += len(self.extension_grid) * len(self.spectral_indices)
                 continue
 
             bin_reco_ra = reco_ra[event_idx]
@@ -363,13 +368,17 @@ class KingPSFFitter:
             bin_true_dec = true_dec[event_idx]
             bin_trueE = trueE[event_idx] if trueE is not None else None
             bin_ow = ow[event_idx] if ow is not None else None
+            unit_offset = rng.rayleigh(1.0, size=len(event_idx))
+            bearing = rng.uniform(0, 2 * np.pi, size=len(event_idx))
 
             for ext_idx, extension in enumerate(self.extension_grid):
                 if extension == 0.0:
-                    bin_dpsi = angular_distance(bin_reco_ra, bin_reco_dec, bin_true_ra, bin_true_dec)
+                    bin_dpsi = angular_distance(
+                        bin_reco_ra, bin_reco_dec, bin_true_ra, bin_true_dec
+                    )
                 else:
-                    smeared_ra, smeared_dec = sample_with_extension(
-                        bin_true_ra, bin_true_dec, extension, rng
+                    smeared_ra, smeared_dec = offset_position(
+                        bin_true_ra, bin_true_dec, extension * unit_offset, bearing
                     )
                     bin_dpsi = angular_distance(bin_reco_ra, bin_reco_dec, smeared_ra, smeared_dec)
 
@@ -497,12 +506,24 @@ class KingPSFFitter:
         cdf_hist = np.cumsum(hist)
         cdf_variance = np.cumsum(hist2) / np.sum(hist) ** 2
 
+        bounds = [
+            (np.nextafter(1e-4, np.pi), np.nextafter(self.angular_cutoff, 0)),
+            (1.01, 1000),
+        ]
+
+        def fit(alpha0, beta0):
+            return minimize(
+                lambda params: self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, *params),
+                [alpha0, beta0],
+                method="L-BFGS-B",
+                jac=True,
+                bounds=bounds,
+            )
+
         # Get initial guess by doing a rough scan over alpha and beta.
         alpha_median_guess = bin_centers[np.searchsorted(cdf_hist, 0.5)]
         alpha_candidates = np.clip(
-            alpha_median_guess * np.array([0.5, 0.75, 1.0, 1.5, 2.0]),
-            np.nextafter(1e-4, np.pi),
-            np.nextafter(self.angular_cutoff, 0),
+            alpha_median_guess * np.array([0.5, 0.75, 1.0, 1.5, 2.0]), *bounds[0]
         )
         beta_candidates = [1.25, 1.75, 2, 2.5, 4, 7, 9]
         best_prescan, alpha_guess, beta_guess = None, alpha_median_guess, 2
@@ -511,44 +532,25 @@ class KingPSFFitter:
                 val = self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, alpha, beta)[0]
                 if best_prescan is None or val < best_prescan:
                     best_prescan, alpha_guess, beta_guess = val, alpha, beta
-        result = minimize(
-            lambda params: self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, *params),
-            [alpha_guess, beta_guess],
-            method="L-BFGS-B",
-            jac=True,
-            bounds=[
-                (np.nextafter(1e-4, np.pi), np.nextafter(self.angular_cutoff, 0)),
-                (1.01, 1000),
-            ],
-        )
+        result = fit(alpha_guess, beta_guess)
 
         # If the fit doesn't succeed, try manually seeding with other beta values.
         if not result.success:
             best = None
             for beta in beta_candidates:
-                result = minimize(
-                    lambda params: self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, *params),
-                    [alpha_guess, beta],
-                    method="L-BFGS-B",
-                    jac=True,
-                    bounds=[
-                        (np.nextafter(1e-4, np.pi), np.nextafter(self.angular_cutoff, 0)),
-                        (1.01, 1000),
-                    ],
-                )
-
+                result = fit(alpha_guess, beta)
                 if result.success:
                     if (best is None) or (best.fun > result.fun):
                         best = result
 
-            result = best
+            if best is not None:
+                result = best
 
         # Store histogram data (pad/truncate to match storage size).
         # Make sure to rescale by the phase space to get densities.
         n_store = min(len(hist), self.dpsi_nbins)
         self.histograms[param_idx][:n_store] = hist[:n_store] / delta
         self.uncertainties[param_idx][:n_store] = np.sqrt(hist2[:n_store]) / delta
-        self.dpsi_bins[param_idx][: len(dpsi_bins)] = dpsi_bins
 
         # Store results if we found a solution
         if result.success:
@@ -561,7 +563,8 @@ class KingPSFFitter:
 
     def get_interpolator(self, gamma_index: int = 0, extension_index: int = 0) -> Tuple[Any, Any]:
         """
-        Get an interpolator for fitted parameters at a given spectral index.
+        Get an interpolator for fitted parameters at a given spectral index
+        and extension.
 
         Parameters
         ----------
@@ -599,7 +602,7 @@ class KingPSFFitter:
             self.fit_beta[extension_index, gamma_index],
             method="linear",
             bounds_error=False,
-            fill_value=self.fit_beta[gamma_index].mean(),
+            fill_value=self.fit_beta[extension_index, gamma_index].mean(),
         )
 
         return alpha_interp, beta_interp

@@ -7,10 +7,13 @@ Tests cover:
 - Correlated auxiliary parameter (log10_energy) → monotonic trend in alpha/beta
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
+import kingmaker.fitting as fitting_module
 from kingmaker.fitting import KingPSFFitter
 from kingmaker.pdf import KingPDF
 
@@ -100,6 +103,25 @@ class TestKingPSFFitterStructure:
             weight_field=None,
         )
         assert fitter.parametrization_shape == [4]
+
+    def test_missing_energy_field_raises(self):
+        rng = np.random.default_rng(RNG_SEED)
+        events = _make_events(500, np.radians(1.0), 2.5, "ow", np.ones(500), rng)
+        with pytest.raises(ValueError, match="trueE"):
+            KingPSFFitter(events, parametrization_bins={"ow": [0.0, 2.0]}, weight_field="ow")
+
+    def test_empty_bins_counted_as_skipped(self, capsys):
+        rng = np.random.default_rng(RNG_SEED)
+        events = _make_events(2000, np.radians(1.0), 2.5, "aux", rng.uniform(-1, 1, 2000), rng)
+        fitter = KingPSFFitter(
+            events,
+            parametrization_bins={"aux": [-1.0, 0.0, 1.0, 2.0]},
+            minimum_counts=100,
+            weight_field=None,
+            extension_grid=[0.0, np.radians(1.0)],
+        )
+        fitter.fit_all_bins(verbose=True)
+        assert "Fitted 4 bins, skipped 2 bins" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +284,62 @@ class TestKingPSFFitterExtensionGrid:
             extension_grid=[np.radians(2.0), 0.0, np.radians(1.0)],
         )
         assert_allclose(fitter.extension_grid, [0.0, np.radians(1.0), np.radians(2.0)])
+
+    def test_get_interpolator_fill_value_indices(self):
+        rng = np.random.default_rng(RNG_SEED)
+        events = _make_events(500, np.radians(1.0), 2.5, "aux", rng.uniform(-1, 1, 500), rng)
+        fitter = KingPSFFitter(
+            events,
+            parametrization_bins={"aux": [-1.0, 0.0, 1.0]},
+            minimum_counts=100,
+            weight_field=None,
+            spectral_indices=[2.0, 3.0],
+            extension_grid=[0.0, np.radians(1.0)],
+        )
+        fitter.fit_beta = np.arange(8.0).reshape(2, 2, 2)
+        _, beta_interp = fitter.get_interpolator(gamma_index=1, extension_index=1)
+        assert_allclose(beta_interp([5.0]), fitter.fit_beta[1, 1].mean())
+
+    def test_fallback_alpha_grows_with_extension(self):
+        rng = np.random.default_rng(RNG_SEED)
+        events = _make_events(500, np.radians(1.0), 2.5, "aux", np.zeros(500), rng)
+        fitter = KingPSFFitter(
+            events,
+            parametrization_bins={"aux": [-1.0, 1.0]},
+            minimum_counts=100,
+            weight_field=None,
+            extension_grid=[0.0, np.radians(2.0)],
+        )
+        assert_allclose(fitter.fit_alpha[0], fitter._alpha_guess)
+        assert np.all(fitter.fit_alpha[1] > fitter.fit_alpha[0])
+
+    def test_all_fits_failing_keeps_fallback(self, monkeypatch):
+        failed = SimpleNamespace(success=False, x=np.array([1.0, 2.0]), fun=1.0)
+        monkeypatch.setattr(fitting_module, "minimize", lambda *a, **k: failed)
+        rng = np.random.default_rng(RNG_SEED)
+        events = _make_events(500, np.radians(1.0), 2.5, "aux", np.zeros(500), rng)
+        fitter = KingPSFFitter(
+            events, parametrization_bins={"aux": [-1.0, 1.0]}, minimum_counts=100, weight_field=None
+        )
+        result = fitter.fit_all_bins(verbose=False)
+        assert_allclose(result["alpha"], fitter._alpha_guess)
+        assert np.all(result["histograms"].sum(axis=-1) > 0)
+
+    def test_extension_fit_independent_of_grid(self):
+        rng = np.random.default_rng(RNG_SEED)
+        events = _make_events(5000, np.radians(1.0), 2.5, "aux", np.zeros(5000), rng)
+        results = []
+        for grid in ([0.0, np.radians(2.0)], [0.0, np.radians(1.0), np.radians(2.0)]):
+            fitter = KingPSFFitter(
+                events,
+                parametrization_bins={"aux": [-1.0, 1.0]},
+                minimum_counts=100,
+                weight_field=None,
+                extension_grid=grid,
+            )
+            results.append(fitter.fit_all_bins(verbose=False))
+        np.testing.assert_array_equal(results[0]["alpha"][-1], results[1]["alpha"][-1])
+        np.testing.assert_array_equal(results[0]["beta"][-1], results[1]["beta"][-1])
 
     @pytest.fixture(scope="class")
     def multi_ext_result(self):

@@ -1,13 +1,13 @@
 """
 Unit tests for kingmaker.utils.
 
-Covers angular_distance, meshgrid2d, and sample_with_extension.
+Covers angular_distance, meshgrid2d, offset_position, and sample_with_extension.
 """
 
 import numpy as np
 from numpy.testing import assert_allclose
 
-from kingmaker.utils import angular_distance, meshgrid2d, sample_with_extension
+from kingmaker.utils import angular_distance, meshgrid2d, offset_position, sample_with_extension
 
 
 # ---------------------------------------------------------------------------
@@ -178,3 +178,29 @@ class TestSampleWithExtension:
         ra, dec = sample_with_extension(0.0, 0.0, np.radians(1.0))
         assert np.isfinite(ra)
         assert np.isfinite(dec)
+
+
+# ---------------------------------------------------------------------------
+# offset_position
+# ---------------------------------------------------------------------------
+
+
+class TestOffsetPosition:
+    def test_distance_recovered(self):
+        rng = np.random.default_rng(5)
+        n = 1000
+        ra0 = rng.uniform(0, 2 * np.pi, n)
+        dec0 = np.arcsin(rng.uniform(-0.99, 0.99, n))
+        distance = rng.uniform(0, np.radians(10.0), n)
+        ra, dec = offset_position(ra0, dec0, distance, rng.uniform(0, 2 * np.pi, n))
+        assert_allclose(angular_distance(ra0, dec0, ra, dec), distance, atol=1e-7)
+
+    def test_north_bearing_increases_dec(self):
+        ra, dec = offset_position(1.0, 0.2, 0.1, 0.0)
+        assert_allclose(ra, 1.0)
+        assert_allclose(dec, 0.3)
+
+    def test_east_bearing_on_equator_increases_ra(self):
+        ra, dec = offset_position(1.0, 0.0, 0.1, np.pi / 2)
+        assert_allclose(ra, 1.1)
+        assert_allclose(dec, 0.0, atol=1e-12)
