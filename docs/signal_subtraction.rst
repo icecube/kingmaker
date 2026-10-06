@@ -1,7 +1,7 @@
 .. _signal-subtraction:
 
-Signal-subtraction likelihoods and the marginalized King PDF
-=============================================================
+Signal-subtraction likelihoods and the RA-averaged King PDF
+============================================================
 
 Point-source analyses in IceCube and similar experiments commonly use a
 actual detector data to model their background PDFs. When this is done, the
@@ -92,14 +92,14 @@ Choosing between ``pdf()`` and ``evaluate()``
 the RA-averaged King PDF:
 
 :meth:`~kingmaker.pdf.MarginalizedKingPDF.pdf` ``(x, alpha, beta, source_dec)``
-    Evaluates the marginalized PDF for a **single source** at an array of
+    Evaluates the RA-averaged PDF for a **single source** at an array of
     reconstructed event declinations ``x``. Returns a **dense NumPy array** of
-    shape ``(n_events,)``. Use this for plotting the marginalized profile,
+    shape ``(n_events,)``. Use this for plotting the RA-averaged profile,
     quick sanity checks, or any context where you only need one source at a
     time.
 
 :meth:`~kingmaker.pdf.MarginalizedKingPDF.evaluate` ``(source_decs, event_decs, alpha, beta)``
-    Evaluates the marginalized PDF for **all (event, source) pairs** in a
+    Evaluates the RA-averaged PDF for **all (event, source) pairs** in a
     single call and returns a :class:`scipy.sparse.csr_array` of shape
     ``(n_events, n_sources)``. Events more than ``angular_cutoff`` from a
     source contribute zero and are omitted from the sparse structure, so the
@@ -118,7 +118,7 @@ Full-sky King PDF and its RA-averaged profile
 ---------------------------------------------
 
 The following example compares the 2D King PDF on the sky to the 1D
-marginalized profile at a fixed :math:`(\alpha, \beta)`.
+RA-averaged profile at a fixed :math:`(\alpha, \beta)`.
 
 .. code-block:: python
 
@@ -143,7 +143,7 @@ marginalized profile at a fixed :math:`(\alpha, \beta)`.
    psi = angular_distance(0.0, source_dec, DRA, DEC)
    pdf_2d = mkpdf.king.pdf_from_norm(psi, alpha, beta, mkpdf.king.norm(alpha, beta))
 
-   # --- 1D marginalized profile ---
+   # --- 1D RA-averaged profile ---
    dec_reco_1d = np.linspace(source_dec - cutoff, source_dec + cutoff, 200)
    alpha_arr = np.full(len(dec_reco_1d), alpha)
    beta_arr = np.full(len(dec_reco_1d), beta)
@@ -178,10 +178,10 @@ marginalized profile at a fixed :math:`(\alpha, \beta)`.
 
 .. _signal-subtraction-evaluation:
 
-Evaluating the marginalized PDF over arrays of events and sources
------------------------------------------------------------------
+Evaluating the RA-averaged PDF over arrays of events and sources
+----------------------------------------------------------------
 
-:meth:`~kingmaker.pdf.MarginalizedKingPDF.pdf` accepts per-event arrays of
+:meth:`~kingmaker.pdf.MarginalizedKingPDF.evaluate` accepts per-event arrays of
 ``dec_reco``, ``alpha``, and ``beta`` together with an array of source
 declinations, and returns a :class:`scipy.sparse.csr_array` of shape
 ``(n_events, n_sources)``.
@@ -226,7 +226,7 @@ declinations, and returns a :class:`scipy.sparse.csr_array` of shape
 Grid layout and configuration options
 --------------------------------------
 
-The marginalization cache is a 4D array indexed by:
+The interpolation grid is a 4D array indexed by:
 
 #. **source_declination** — the sorted source declination(s) passed to the
    constructor.

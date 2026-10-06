@@ -35,7 +35,7 @@ This package implements the King/Moffat distribution on a sphere. The current im
 - **Vectorized operations**: NumPy broadcasting for simultaneous evaluation at multiple points
 - **JIT-compiled kernels**: All inner-loop functions compiled and cached with numba for near-native performance
 - **Multi-dimensional fitting**: Parameterize PSF as function of energy, declination, angular error, etc.
-- **Signal subtraction**: Built-in RA marginalization for likelihood-based analyses
+- **Signal subtraction**: RA-averaged King PDF for signal-subtraction likelihoods
 - **Template smearing**: Incorporate diffuse backgrounds and Galactic plane effects via spherical harmonics
 - **Flexible binning**: Support for both equal-probability and explicit bin edges
 
@@ -134,15 +134,15 @@ beta_value = beta_interp(test_point)
 
 ### Signal-Subtracted Likelihood
 
-`MarginalizedKingPDF` pre-computes the King PDF integrated over right ascension
-on a grid and exposes two methods for different use cases:
+`MarginalizedKingPDF` pre-computes the King PDF averaged over right ascension
+(sr⁻¹) on a grid and exposes two methods for different use cases:
 
-- **`pdf(x, alpha, beta, source_dec)`** — evaluates the marginalized PDF for a
+- **`pdf(x, alpha, beta, source_dec)`** — evaluates the RA-averaged PDF for a
   *single* source at a given set of event declinations. Returns a dense NumPy
   array. Intended for plotting, diagnostics, and demonstrations.
 
 - **`evaluate(source_decs, event_decs, alpha, beta)`** — evaluates the
-  marginalized PDF for *all* (event, source) pairs at once and returns a
+  RA-averaged PDF for *all* (event, source) pairs at once and returns a
   `scipy.sparse.csr_array` of shape `(n_events, n_sources)`. The sparse format
   is efficient because events far from a source (beyond `angular_cutoff`)
   contribute zero and are omitted. This is the method to use in analyses.
@@ -183,7 +183,7 @@ print(f"Nonzero fraction: {pdf_matrix.nnz / pdf_matrix.shape[0] / pdf_matrix.sha
 pdf_matrix_2 = mkpdf.evaluate(source_decs, ev_decs, alpha_evt, beta_evt, mask=pdf_matrix)
 ```
 
-`KingSpatialLikelihood` integrates the marginalized path directly. Pass
+`KingSpatialLikelihood` supports the RA-averaged path directly. Pass
 `enable_marginalization=True` and a source-declination array at construction;
 `set_events` then precomputes one sparse matrix per spectral index so that
 `evaluate_marginalized_pdf` can interpolate in O(nnz) without additional grid
@@ -214,7 +214,7 @@ wrapper.set_events(data_events, source_ras=np.array([src_ra]),
 pdf_matrix = wrapper.evaluate_pdf(data_events, gamma=2.0)
 pdf_values = pdf_matrix.toarray().ravel()
 
-# RA-marginalized PDF: sparse (n_events, n_sources) matrix.
+# RA-averaged PDF (sr⁻¹): sparse (n_events, n_sources) matrix.
 pdf_sparse = wrapper.evaluate_marginalized_pdf(data_events, gamma=2.0)
 ```
 
