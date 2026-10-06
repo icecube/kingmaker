@@ -102,6 +102,11 @@ def angular_distance(
     return np.arccos(np.minimum(np.maximum(cosDist, -1.0), 1.0))  # type: ignore[no-any-return]
 
 
+def _bin_index(edges: npt.ArrayLike, values: npt.ArrayLike) -> npt.NDArray[np.intp]:
+    """Index of the bin containing each value, clamped to the edge bins."""
+    return np.clip(np.digitize(values, edges), 1, len(edges) - 1) - 1  # type: ignore[arg-type]
+
+
 def offset_position(
     ra: float | npt.NDArray[np.floating],
     dec: float | npt.NDArray[np.floating],

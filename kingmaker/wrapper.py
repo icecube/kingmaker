@@ -9,7 +9,7 @@ from scipy.sparse import csr_array
 
 from .fitting import KingPSFFitter
 from .pdf import KingPDF, MarginalizedKingPDF
-from .utils import _interp1d, _pre_mask_and_distance
+from .utils import _bin_index, _interp1d, _pre_mask_and_distance
 
 logger = logging.getLogger(__name__)
 
@@ -137,12 +137,7 @@ class KingSpatialLikelihood:
         except AttributeError:
             self.parametrization_bins = self.parametrization_bins.item()
 
-        # Extract the bin centers and keys for each event. The stored bins are
-        # edges, but interpn requires coordinates matching the values shape.
-        self.keys, self.bin_centers = [], []
-        for key, edges in self.parametrization_bins.items():
-            self.keys.append(key)
-            self.bin_centers.append((edges[:-1] + edges[1:]) / 2)
+        self.keys = list(self.parametrization_bins.keys())
 
         # Extension grid (bin-center-style values, nearest-snapped per source).
         if "extension_grid" not in fitted_parameters:
@@ -189,7 +184,7 @@ class KingSpatialLikelihood:
 
         # Precompute the normalization constant for every (gamma, bin) combination
         # on the fitted grid once at init. set_events looks up per-event norms from
-        # this array using the same nearest-bin indices as alpha/beta.
+        # this array using the same bin indices as alpha/beta.
         self.norm_values = self.king_pdf.norm(self.alpha_values, self.beta_values)
 
         # Optionally build the RA-marginalized PDF for signal-subtraction likelihoods.
@@ -273,7 +268,7 @@ class KingSpatialLikelihood:
         Cache per-event King PDF values for each spectral index ahead of a call
         to :meth:`evaluate_pdf`.
 
-        For each event, the nearest parametrization bin is looked up to obtain
+        For each event, the parametrization bin containing it is looked up to obtain
         per-event alpha/beta parameters, the angular distance to the source is
         computed, and the King PDF is evaluated and cached for every spectral
         index in ``spectral_indices``. This must be called before
@@ -450,15 +445,15 @@ class KingSpatialLikelihood:
 
     def _lookup_event_grid(self, events):
         """
-        Nearest-bin lookup of alpha, beta, and norm for each (unmasked) event,
+        Bin lookup of alpha, beta, and norm for each (unmasked) event,
         for every extension in extension_grid.
 
         Shared by :meth:`get_alpha_beta` and :meth:`set_events` so the
-        nearest-bin index computation is only ever done once per call.
+        bin index computation is only ever done once per call.
         """
         event_indices = tuple(
-            _nearest_index(self.bin_centers[i], events[key][self.event_mask])
-            for i, key in enumerate(self.keys)
+            _bin_index(self.parametrization_bins[key], events[key][self.event_mask])
+            for key in self.keys
         )
 
         idx = (slice(None), slice(None), *event_indices)
@@ -466,7 +461,7 @@ class KingSpatialLikelihood:
 
     def _lookup_all_events_grid(self, events):
         """
-        Nearest-bin lookup of alpha and beta for every event, without applying
+        Bin lookup of alpha and beta for every event, without applying
         ``event_mask``, for every extension in extension_grid.
 
         Used by :meth:`set_events` to supply per-event PSF parameters for
@@ -479,14 +474,14 @@ class KingSpatialLikelihood:
         beta  : ndarray, shape (n_extension, n_gamma, n_events)
         """
         event_indices = tuple(
-            _nearest_index(self.bin_centers[i], events[key]) for i, key in enumerate(self.keys)
+            _bin_index(self.parametrization_bins[key], events[key]) for key in self.keys
         )
         idx = (slice(None), slice(None), *event_indices)
         return self.alpha_values[idx], self.beta_values[idx]
 
     def get_alpha_beta(self, events, extension_index: int = 0):
         """
-        Look up fitted alpha/beta parameters for each event via nearest-bin lookup.
+        Look up fitted alpha/beta parameters from the bin containing each event.
 
         Used internally by :meth:`set_events`. Useful for inspecting the fitted
         King parameters assigned to specific events.

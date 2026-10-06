@@ -103,6 +103,20 @@ class TestKingPSFFitterStructure:
         )
         assert fitter.parametrization_shape == [4]
 
+    def test_percentile_bins_with_repeated_values_are_strictly_increasing(self):
+        rng = np.random.default_rng(RNG_SEED)
+        aux_vals = np.where(rng.uniform(size=3000) < 0.5, 0.0, rng.uniform(0, 1, 3000))
+        events = _make_events(3000, np.radians(1.0), 2.5, "aux", aux_vals, rng)
+        fitter = KingPSFFitter(
+            events,
+            parametrization_bins={"aux": 10},
+            dpsi_nbins=30,
+            minimum_counts=100,
+            weight_field=None,
+        )
+        assert np.all(np.diff(fitter.parametrization_bins["aux"]) > 0)
+        fitter.get_interpolator()
+
     def test_missing_energy_field_raises(self):
         rng = np.random.default_rng(RNG_SEED)
         events = _make_events(500, np.radians(1.0), 2.5, "ow", np.ones(500), rng)

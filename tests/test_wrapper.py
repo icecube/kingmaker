@@ -367,6 +367,30 @@ class TestNearestIndex:
         np.testing.assert_array_equal(_nearest_index(np.array([1.0]), [0.5, 1.5]), [0, 0])
 
 
+class TestBinLookup:
+    def test_lookup_uses_bin_edges(self, tmp_path):
+        # Unequal widths: aux=0.5 lies in [0.2, 3.0) but is nearer the [0, 0.2) center.
+        cache_path = tmp_path / "unequal_bins.npz"
+        np.savez(
+            cache_path,
+            parametrization_bins=np.array({"aux": np.array([0.0, 0.2, 3.0])}, dtype=object),
+            alpha=np.array([[[np.radians(0.5), np.radians(2.0)]] * 3]),
+            beta=np.full((1, 3, 2), 2.5),
+            extension_grid=np.array([0.0]),
+        )
+        likelihood = KingSpatialLikelihood(
+            signal_events=np.empty(0),
+            parametrization_bins={"aux": 2},
+            spectral_indices=SPECTRAL_INDICES,
+            cache_parameters=True,
+            cache_name=str(cache_path),
+        )
+        events = _make_events(5, np.random.default_rng(16))
+        likelihood.set_events(events, source_ras=np.array([0.0]), source_decs=np.array([0.0]))
+        alpha, _ = likelihood.get_alpha_beta(events)
+        np.testing.assert_allclose(alpha, np.radians(2.0))
+
+
 class TestSourceExtensions:
     def test_default_is_zero(self, tmp_path):
         likelihood = _make_multi_ext_likelihood(tmp_path)

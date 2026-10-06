@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 from .distribution import _cdf_and_gradient
 from .pdf import KingPDF
-from .utils import angular_distance, offset_position
+from .utils import _bin_index, angular_distance, offset_position
 
 
 class KingPSFFitter:
@@ -148,11 +148,7 @@ class KingPSFFitter:
         # Pre-group events by flat bin index for O(1) per-bin lookup in fit_all_bins.
         # Replaces the per-iteration boolean-mask construction over all events.
         _shape = tuple(self.parametrization_shape)
-        _idx_arrays = [
-            np.clip(self.event_indices[k], 1, s) - 1  # 0-based, clipped in-range
-            for k, s in zip(self.bin_names, _shape)
-        ]
-        _flat = np.ravel_multi_index(_idx_arrays, _shape)
+        _flat = np.ravel_multi_index([self.event_indices[k] for k in self.bin_names], _shape)
         self._event_sort_order = np.argsort(_flat, kind="stable")
         _sorted_flat = _flat[self._event_sort_order]
         _n_bins = int(np.prod(_shape))
@@ -264,8 +260,7 @@ class KingPSFFitter:
         positions = np.clip(positions, 0, len(values) - 1)
 
         # Handle duplicates by using unique values
-        positions = np.unique(positions)
-        bin_edges = values[sorted_idx][positions]
+        bin_edges = np.unique(values[sorted_idx][positions])
 
         # Ensure we have at least 2 edges (1 bin)
         if len(bin_edges) < 2:
@@ -273,18 +268,19 @@ class KingPSFFitter:
 
         return bin_edges
 
-    def _bin_events(self) -> dict[str, npt.NDArray[np.integer]]:
+    def _bin_events(self) -> dict[str, npt.NDArray[np.intp]]:
         """
         Assign each event to a bin index for each parameterization dimension.
 
         Returns
         -------
         dict
-            Dictionary mapping field names to bin indices for each event.
+            Dictionary mapping field names to bin indices for each event,
+            clamped to the edge bins.
         """
         event_indices = {}
         for key, bins in self.parametrization_bins.items():
-            event_indices[key] = np.digitize(self.signal_events[key], bins)
+            event_indices[key] = _bin_index(bins, self.signal_events[key])
         return event_indices
 
     def _initialize_storage(self) -> None:
@@ -624,7 +620,7 @@ class KingPSFFitter:
         ----------
         bin_indices : tuple or dict
             Indices of the bin to plot. Can be tuple of integers or dict
-            mapping bin names to indices.
+            mapping bin names to indices. Negative indices count from the end.
         gamma_index : int, optional
             Index of spectral index. Default is 0.
         ax : matplotlib.axes.Axes, optional
@@ -650,8 +646,11 @@ class KingPSFFitter:
         # Convert dict to tuple if needed
         if isinstance(bin_indices, dict):
             bin_indices = tuple(bin_indices[key] for key in self.bin_names)
+        bin_indices = tuple(
+            int(i) % n for i, n in zip(bin_indices, self.parametrization_shape, strict=True)
+        )
 
-        param_idx = (extension_index, gamma_index) + tuple(bin_indices)
+        param_idx = (extension_index, gamma_index) + bin_indices
 
         # Get histogram data
         hist = self.histograms[param_idx]
@@ -660,12 +659,16 @@ class KingPSFFitter:
 
         # Only plot non-zero bins
         mask = hist > 0
-        bin_centers = (bins[:-1] + bins[1:])[mask] / 2
+        if not mask.any():
+            raise ValueError(f"No histogram stored for bin {bin_indices}.")
+        lo, hi = bins[:-1][mask], bins[1:][mask]
+        bin_centers = (lo + hi) / 2
 
         # Plot histogram
         ax.errorbar(
             np.degrees(bin_centers),
             hist[mask],
+            xerr=np.degrees([bin_centers - lo, hi - bin_centers]),
             yerr=uncertainty[mask],
             fmt="o",
             label="MC Events",
@@ -673,18 +676,27 @@ class KingPSFFitter:
             markersize=4,
         )
 
-        # Plot fitted King PDF
+        # Plot fitted King PDF and its per-bin average density
         alpha = self.fit_alpha[param_idx]
         beta = self.fit_beta[param_idx]
-        dpsi_fine = np.linspace(0, min(8 * alpha, np.pi), 1000)
+        dpsi_fine = np.geomspace(1e-3 * alpha, hi.max(), 1000)
         pdf_fit = cast(npt.NDArray[np.floating], self.king_pdf.pdf(dpsi_fine, alpha, beta))
-        pdf_fit *= hist[mask].max() / pdf_fit.max()  # Normalize for visualization
-
         ax.plot(np.degrees(dpsi_fine), pdf_fit, "-", linewidth=2, label="King Fit", color="blue")
+
+        cdf_diff = self.king_pdf.cdf(hi, alpha, beta) - self.king_pdf.cdf(lo, alpha, beta)
+        bin_average = cdf_diff / (2 * np.pi * (np.cos(lo) - np.cos(hi)))
+        ax.plot(
+            np.degrees(bin_centers),
+            bin_average,
+            "o",
+            markerfacecolor="none",
+            color="blue",
+            label="King Fit (bin average)",
+        )
 
         # Add labels
         ax.set_xlabel("Angular Error (degrees)")
-        ax.set_ylabel("Normalized Density")
+        ax.set_ylabel("Density (1/sr)")
         ax.set_yscale("log")
         ax.grid(alpha=0.3)
         ax.legend()
@@ -693,9 +705,8 @@ class KingPSFFitter:
         title = f"γ={self.spectral_indices[gamma_index]:.2f}, "
         title += f"α={np.degrees(alpha):.3f}°, β={beta:.2f}\n"
         for i, key in enumerate(self.bin_names):
-            bin_idx = bin_indices[i]
-            bins = self.parametrization_bins[key]
-            title += f"{key}=[{bins[bin_idx]:.2e}, {bins[bin_idx + 1]:.2e}] "
+            edges = self.parametrization_bins[key]
+            title += f"{key}=[{edges[bin_indices[i]]:.3g}, {edges[bin_indices[i] + 1]:.3g}] "
         ax.set_title(title, fontsize=10)
 
         return ax
