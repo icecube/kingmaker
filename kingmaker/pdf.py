@@ -1,3 +1,4 @@
+import warnings
 from typing import cast
 
 import healpy as hp
@@ -359,17 +360,19 @@ class KingPDF:
 
 class MarginalizedKingPDF:
     """
-    King PDF pre-integrated over right ascension for signal-subtraction likelihoods.
+    King PDF averaged over right ascension for signal-subtraction likelihoods.
 
-    Pre-computes a four-dimensional grid of RA-marginalized King PDF values over
+    Pre-computes a four-dimensional grid of RA-averaged King PDF values (sr⁻¹) over
     (source_declination, log10(alpha), beta, dec_reco - source_declination) at
     construction and evaluates it via trilinear interpolation at runtime.
 
     :meth:`evaluate` returns a :class:`scipy.sparse.csr_array` of shape
-    ``(n_events, n_sources)`` whose nonzero entries are the marginalized PDF
+    ``(n_events, n_sources)`` whose nonzero entries are the RA-averaged PDF
     values for event–source pairs within ``angular_cutoff`` of each other.
     A :class:`~kingmaker.pdf.KingPDF` instance is accessible via :attr:`king`
     for sampling, CDF evaluation, and similar point-source operations.
+    Alpha and beta outside the grid are clamped to its edges with a
+    :class:`RuntimeWarning`.
 
     Parameters
     ----------
@@ -382,13 +385,13 @@ class MarginalizedKingPDF:
         Alpha grid points in radians. Default: 30 log-spaced values from
         0.05 degrees to pi.
     points_beta : ndarray, optional
-        Beta grid points. Default: 20 log-spaced values from ~1.023 to 10.
-        Lower bound is kept above 1 to avoid float64 precision loss in the
-        normalization at beta -> 1.
+        Beta grid points. Default: 60 log-spaced values from 1.01 to 1000,
+        matching the :class:`~kingmaker.fitting.KingPSFFitter` bounds.
     n_signed_delta_dec : int, optional
         Number of grid points in the signed declination-offset axis. Default: 200.
     n_ra_bins : int, optional
-        Number of RA integration intervals over [0, pi]. Default: 100.
+        Number of RA integration intervals per source, spanning the RA
+        half-width of ``angular_cutoff``. Default: 100.
     """
 
     def __init__(
@@ -418,9 +421,7 @@ class MarginalizedKingPDF:
         )
         self._points_beta = np.sort(
             np.asarray(
-                # Lower bound is kept away from 1.0 to avoid float64 precision
-                # loss in _norm() at beta -> 1, which otherwise produces inf.
-                points_beta if points_beta is not None else np.logspace(0.01, 1, 20),
+                points_beta if points_beta is not None else np.geomspace(1.01, 1000, 60),
                 dtype=np.float64,
             )
         )
@@ -440,7 +441,7 @@ class MarginalizedKingPDF:
 
     def _build_cache(self) -> None:
         """
-        Build the precomputed RA-marginalized PDF grid.
+        Build the precomputed RA-averaged PDF grid.
 
         Fills a 4D grid over (source_declination, log10(alpha), beta,
         signed_delta_dec), where signed_delta_dec = dec_reco - source_declination.
@@ -455,10 +456,6 @@ class MarginalizedKingPDF:
             -self.angular_cutoff, self.angular_cutoff, self._n_signed_delta_dec
         )
 
-        # RA integration nodes on [0, pi] (see _marginalize_ra for the
-        # symmetry argument that limits integration to this half).
-        ra_grid = np.linspace(0.0, np.pi, self._n_ra_bins + 1)
-
         # Normalization depends only on (alpha, beta), not on source declination,
         # so it's computed once here instead of inside the per-(dec, alpha, beta)
         # numba loop.
@@ -472,9 +469,49 @@ class MarginalizedKingPDF:
             norm_grid.astype(np.float64),
             float(self.angular_cutoff),
             self._signed_delta_dec,
-            ra_grid,
+            self._n_ra_bins,
         )
         # self._grid has shape (n_sources, n_alpha, n_beta, n_signed_delta_dec)
+
+    def _interpolate(self, queries: npt.NDArray[np.floating]) -> npt.NDArray[np.floating]:
+        """
+        Interpolate the grid, clamping alpha and beta to its edges.
+
+        Parameters
+        ----------
+        queries : ndarray, shape (n, 4)
+            Rows of (source_dec, log10(alpha), beta, signed_delta_dec).
+            Modified in place when clamping.
+
+        Returns
+        -------
+        ndarray, shape (n,)
+            Interpolated PDF values in sr⁻¹.
+        """
+        params = queries[:, 1:3]
+        lower = np.array([self._log10_points_alpha[0], self._points_beta[0]])
+        upper = np.array([self._log10_points_alpha[-1], self._points_beta[-1]])
+        if np.any((params < lower) | (params > upper)):
+            warnings.warn(
+                "alpha or beta outside the marginalization grid; clamping to grid edges. "
+                "Widen points_alpha or points_beta to avoid this.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            np.clip(params, lower, upper, out=params)
+        return interpn(
+            (
+                self.source_declination,
+                self._log10_points_alpha,
+                self._points_beta,
+                self._signed_delta_dec,
+            ),
+            self._grid,
+            queries,
+            method="linear",
+            bounds_error=False,
+            fill_value=0.0,
+        )
 
     def pdf(
         self,
@@ -484,9 +521,9 @@ class MarginalizedKingPDF:
         source_dec: float,
     ) -> npt.NDArray[np.floating]:
         """
-        Evaluate the RA-marginalized King PDF for one source at given event declinations.
+        Evaluate the RA-averaged King PDF for one source at given event declinations.
 
-        Mirrors :meth:`KingPDF.pdf` for the marginalized distribution: ``x`` is
+        Mirrors :meth:`KingPDF.pdf` for the RA-averaged distribution: ``x`` is
         the reconstructed event declination (not angular separation) and
         ``source_dec`` specifies the single source position. Returns a dense
         array. Use :meth:`evaluate` for efficient batch evaluation over many
@@ -506,7 +543,7 @@ class MarginalizedKingPDF:
         Returns
         -------
         ndarray, shape (n_events,)
-            Marginalized PDF values in rad⁻¹. Zero for events farther than
+            RA-averaged PDF values in sr⁻¹. Zero for events farther than
             ``angular_cutoff`` from ``source_dec`` in declination.
         """
         x, alpha, beta = np.broadcast_arrays(
@@ -533,19 +570,7 @@ class MarginalizedKingPDF:
                 signed_delta_dec[within],
             ]
         )
-        result[within] = interpn(
-            (
-                self.source_declination,
-                self._log10_points_alpha,
-                self._points_beta,
-                self._signed_delta_dec,
-            ),
-            self._grid,
-            queries,
-            method="linear",
-            bounds_error=False,
-            fill_value=0.0,
-        )
+        result[within] = self._interpolate(queries)
         return result
 
     def evaluate(
@@ -558,7 +583,7 @@ class MarginalizedKingPDF:
         mask: csr_array | None = None,
     ) -> csr_array:
         """
-        Evaluate the RA-marginalized King PDF for every (event, source) pair.
+        Evaluate the RA-averaged King PDF for every (event, source) pair.
 
         Looks up values from the precomputed grid via trilinear interpolation
         over (log10(alpha), beta, signed_delta_dec) at each source's declination,
@@ -587,7 +612,7 @@ class MarginalizedKingPDF:
         Returns
         -------
         csr_array, shape (n_events, n_sources)
-            Sparse array of marginalized PDF values, indexed
+            Sparse array of RA-averaged PDF values (sr⁻¹), indexed
             ``[event_index, source_index]``.
         """
         source_decs = np.atleast_1d(np.asarray(source_decs, dtype=np.float64))
@@ -609,19 +634,7 @@ class MarginalizedKingPDF:
                     signed_delta_dec,
                 ]
             )
-            values = interpn(
-                (
-                    self.source_declination,
-                    self._log10_points_alpha,
-                    self._points_beta,
-                    self._signed_delta_dec,
-                ),
-                self._grid,
-                queries,
-                method="linear",
-                bounds_error=False,
-                fill_value=0.0,
-            )
+            values = self._interpolate(queries)
             return csr_array(
                 (values, (rows, cols)),
                 shape=(n_events, n_sources),
@@ -654,19 +667,7 @@ class MarginalizedKingPDF:
         cols = np.concatenate(col_chunks)
         queries = np.vstack(query_chunks)
 
-        values = interpn(
-            (
-                self.source_declination,
-                self._log10_points_alpha,
-                self._points_beta,
-                self._signed_delta_dec,
-            ),
-            self._grid,
-            queries,
-            method="linear",
-            bounds_error=False,
-            fill_value=0.0,
-        )
+        values = self._interpolate(queries)
 
         nonzero = values > 0.0
         return csr_array(

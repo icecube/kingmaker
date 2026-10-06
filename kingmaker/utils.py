@@ -307,16 +307,16 @@ def _marginalize_ra(
     ra_grid: npt.NDArray[np.float64],
 ) -> npt.NDArray[np.float64]:
     """
-    Integrate the King PDF over RA in [0, pi] for each signed declination offset.
+    Average the King PDF over RA for each signed declination offset.
 
     For each entry in signed_delta_dec_grid, computes:
 
-        M(delta_dec) = 2 * integral_0^pi King(psi(dRA, dec_true + delta_dec, dec_true),
-                                              alpha, beta) d(dRA)
+        M(delta_dec) = (1 / pi) * integral_0^pi King(psi(dRA, dec_true + delta_dec, dec_true),
+                                                     alpha, beta) d(dRA)
 
-    where the factor of 2 exploits the RA symmetry of the King distribution.
-    Trapezoid quadrature is applied over the ra_grid nodes. Entries where
-    dec_true + delta_dec falls outside [-pi/2, pi/2] return 0.
+    which equals the average over [0, 2 pi] by the RA symmetry of the King
+    distribution. Trapezoid quadrature is applied over the ra_grid nodes.
+    Entries where dec_true + delta_dec falls outside [-pi/2, pi/2] return 0.
 
     Parameters
     ----------
@@ -333,12 +333,13 @@ def _marginalize_ra(
     signed_delta_dec_grid : ndarray
         Grid of dec_reco - dec_true offsets in radians.
     ra_grid : ndarray
-        Right ascension integration nodes in [0, pi] in radians.
+        Right ascension integration nodes in radians, from 0 to at least the
+        RA half-width of the angular cutoff.
 
     Returns
     -------
     ndarray
-        RA-marginalized PDF values, one per signed_delta_dec_grid entry.
+        RA-averaged PDF values in sr⁻¹, one per signed_delta_dec_grid entry.
     """
     n_delta_dec = len(signed_delta_dec_grid)
     result = np.zeros(n_delta_dec)
@@ -355,8 +356,8 @@ def _marginalize_ra(
             if psi[j] <= angular_cutoff:
                 pdf[j] = norm * _unnormalized_pdf(psi[j], alpha, beta)
 
-        # Double the [0, pi] integral to account for [pi, 2*pi] by RA symmetry.
-        result[i] = 2.0 * np.trapezoid(pdf, ra_grid)
+        # Average over [0, pi]; the PDF is zero past ra_grid[-1].
+        result[i] = np.trapezoid(pdf, ra_grid) / np.pi
 
     return result
 
@@ -369,10 +370,10 @@ def _build_marginalized_grid(
     norm_grid: npt.NDArray[np.float64],
     angular_cutoff: float,
     signed_delta_dec_grid: npt.NDArray[np.float64],
-    ra_grid: npt.NDArray[np.float64],
+    n_ra_bins: int,
 ) -> npt.NDArray[np.float64]:
     """
-    Build the full 4D RA-marginalized King PDF grid.
+    Build the full 4D RA-averaged King PDF grid.
 
     Iterates over (dec_true, alpha, beta), calling _marginalize_ra for each
     triple and storing results in the output array. The dec_true axis could
@@ -393,13 +394,14 @@ def _build_marginalized_grid(
         Maximum angular separation in radians.
     signed_delta_dec_grid : ndarray, shape (n_delta_dec,)
         Grid of dec_reco - dec_true offsets in radians.
-    ra_grid : ndarray, shape (n_ra,)
-        RA integration nodes in [0, pi] in radians.
+    n_ra_bins : int
+        Number of RA integration intervals per source, spanning the RA
+        half-width of the angular cutoff.
 
     Returns
     -------
     ndarray, shape (n_dec, n_alpha, n_beta, n_delta_dec)
-        Marginalized PDF values on the full parameter grid.
+        RA-averaged PDF values on the full parameter grid.
     """
     n_dec = len(dec_true_grid)
     n_alpha = len(alpha_grid)
@@ -408,6 +410,12 @@ def _build_marginalized_grid(
 
     grid = np.zeros((n_dec, n_alpha, n_beta, n_delta_dec))
     for i in prange(n_dec):
+        # RA half-width of the cutoff circle around the source.
+        if angular_cutoff >= np.pi / 2 - abs(dec_true_grid[i]):
+            ra_max = np.pi
+        else:
+            ra_max = np.arcsin(np.sin(angular_cutoff) / np.cos(dec_true_grid[i]))
+        ra_grid = np.linspace(0.0, ra_max, n_ra_bins + 1)
         for j in range(n_alpha):
             for k in range(n_beta):
                 grid[i, j, k, :] = _marginalize_ra(
