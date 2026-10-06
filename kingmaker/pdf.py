@@ -499,18 +499,21 @@ class MarginalizedKingPDF:
                 stacklevel=3,
             )
             np.clip(params, lower, upper, out=params)
-        return interpn(
-            (
-                self.source_declination,
-                self._log10_points_alpha,
-                self._points_beta,
-                self._signed_delta_dec,
+        return cast(
+            npt.NDArray[np.floating],
+            interpn(
+                (
+                    self.source_declination,
+                    self._log10_points_alpha,
+                    self._points_beta,
+                    self._signed_delta_dec,
+                ),
+                self._grid,
+                queries,
+                method="linear",
+                bounds_error=False,
+                fill_value=0.0,
             ),
-            self._grid,
-            queries,
-            method="linear",
-            bounds_error=False,
-            fill_value=0.0,
         )
 
     def pdf(
