@@ -332,6 +332,11 @@ def fine_mkpdf():
     )
 
 
+@pytest.fixture(scope="module")
+def full_sphere_mkpdf():
+    return MarginalizedKingPDF(source_declination=[0.0], angular_cutoff=np.pi)
+
+
 class TestMarginalizedKingPDFInit:
     def test_builds_cache_with_defaults(self):
         mkpdf = MarginalizedKingPDF(
@@ -441,6 +446,18 @@ class TestMarginalizedKingPDFPdf:
         king_values = KingPDF(angular_cutoff=cutoff).pdf(psi, alpha, beta)
         expected = np.trapezoid(king_values, ra) / (2 * np.pi)
         result = mkpdf.pdf([dec_reco], alpha, beta, source_dec)[0]
+        assert_allclose(result, expected, rtol=1e-2)
+
+    @pytest.mark.parametrize("alpha_deg", [0.2, 0.64])
+    @pytest.mark.parametrize("offset", [0.0, 1.0])
+    def test_default_grid_narrow_psf_full_sphere(self, full_sphere_mkpdf, alpha_deg, offset):
+        alpha, beta = np.radians(alpha_deg), 2.5
+        dec_reco = offset * alpha
+        ra = np.linspace(0, 2 * np.pi, 400001)
+        psi = angular_distance(0.0, 0.0, ra, dec_reco)
+        king_values = KingPDF(angular_cutoff=np.pi).pdf(psi, alpha, beta)
+        expected = np.trapezoid(king_values, ra) / (2 * np.pi)
+        result = full_sphere_mkpdf.pdf([dec_reco], alpha, beta, 0.0)[0]
         assert_allclose(result, expected, rtol=1e-2)
 
 
