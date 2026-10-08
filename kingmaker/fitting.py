@@ -74,7 +74,8 @@ class KingPSFFitter:
     dpsi_bins : ndarray
         Angular error bin edges for each bin.
     fit_quality : ndarray
-        Chi-square values indicating fit quality.
+        Anderson-Darling statistics of the fits, scaled by each bin's effective
+        number of events (zero for bins that were not fit).
     """
 
     def __init__(
@@ -328,7 +329,7 @@ class KingPSFFitter:
             - 'histograms': histogram values
             - 'uncertainties': histogram uncertainties
             - 'dpsi_bins': angular error bin edges
-            - 'fit_quality': chi-square values
+            - 'fit_quality': Anderson-Darling statistics
             - 'event_counts': number of events per bin
             - 'parametrization_bins': bin edges
             - 'extension_grid': the extension values fit
@@ -430,7 +431,14 @@ class KingPSFFitter:
             "extension_grid": self.extension_grid,
         }
 
-    def _cdf_chi2(self, cdf_hist, cdf_variance, bins, alpha, beta):
+    def _cdf_anderson_darling(self, cdf_hist, n_eff, bins, alpha, beta):
+        """
+        Anderson-Darling distance between the binned and King CDFs, with gradient.
+
+        Returns ``n_eff * mean((F_hist - F)^2 / (F (1 - F)))`` over the bin edges,
+        where F is the King CDF normalized to the last edge. The last edge is
+        excluded since F = 1 there.
+        """
         try:
             cdf, grad_alpha, grad_beta = _cdf_and_gradient(
                 bins[1:], alpha, beta, self.angular_cutoff
@@ -438,25 +446,25 @@ class KingPSFFitter:
         except ZeroDivisionError:
             return 100000.0, np.zeros(2)
 
-        scale = cdf_hist[-1] / cdf[-1]
-        expected = scale * cdf
-        residuals = cdf_hist - expected
-        inv_variance = 1.0 / np.nextafter(cdf_variance, np.inf)
+        model = cdf / cdf[-1]
+        d_model = (
+            np.array([grad_alpha, grad_beta]) - np.outer([grad_alpha[-1], grad_beta[-1]], model)
+        ) / cdf[-1]
 
-        n_bins = len(bins)
-        val = np.sum(residuals**2 * inv_variance) / n_bins
+        model, d_model = model[:-1], d_model[:, :-1]
+        residuals = cdf_hist[:-1] - model
+        variance = model * (1 - model)
+        floored = variance < 1e-12
+        variance = np.maximum(variance, 1e-12)
+
+        val = n_eff * np.mean(residuals**2 / variance)
         if not np.isfinite(val):
             return 100000.0, np.zeros(2)
 
-        # d(chi2)/dtheta = (-2*scale/n_bins) * sum(r/var * (dCDF - (cdf/cdf_last)*dCDF_last))
-        weighted_residuals = residuals * inv_variance
-        cdf_ratio = cdf / cdf[-1]
-        grad = (-2.0 * scale / n_bins) * np.array(
-            [
-                np.sum(weighted_residuals * (grad_alpha - cdf_ratio * grad_alpha[-1])),
-                np.sum(weighted_residuals * (grad_beta - cdf_ratio * grad_beta[-1])),
-            ]
-        )
+        # d(r^2/v)/dF = -r (2v + r (1 - 2F)) / v^2, dropping dv/dF where v is floored.
+        dv_term = np.where(floored, 0.0, residuals * (1 - 2 * model))
+        coeff = -residuals * (2 * variance + dv_term) / variance**2
+        grad = n_eff * (d_model @ coeff) / len(residuals)
         return val, grad
 
     def _fit_single_bin(
@@ -503,7 +511,7 @@ class KingPSFFitter:
         hist2, _ = np.histogram(masked_dpsi, bins=dpsi_bins, weights=masked_weights**2)
 
         cdf_hist = np.cumsum(hist)
-        cdf_variance = np.cumsum(hist2) / np.sum(hist) ** 2
+        n_eff = 1.0 / np.sum(masked_weights**2)
 
         bounds = [
             (np.nextafter(1e-4, np.pi), np.nextafter(self.angular_cutoff, 0)),
@@ -512,7 +520,7 @@ class KingPSFFitter:
 
         def fit(alpha0, beta0):
             return minimize(
-                lambda params: self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, *params),
+                lambda params: self._cdf_anderson_darling(cdf_hist, n_eff, dpsi_bins, *params),
                 [alpha0, beta0],
                 method="L-BFGS-B",
                 jac=True,
@@ -528,7 +536,7 @@ class KingPSFFitter:
         best_prescan, alpha_guess, beta_guess = None, alpha_median_guess, 2
         for alpha in alpha_candidates:
             for beta in beta_candidates:
-                val = self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, alpha, beta)[0]
+                val = self._cdf_anderson_darling(cdf_hist, n_eff, dpsi_bins, alpha, beta)[0]
                 if best_prescan is None or val < best_prescan:
                     best_prescan, alpha_guess, beta_guess = val, alpha, beta
         result = fit(alpha_guess, beta_guess)
