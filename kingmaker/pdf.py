@@ -371,8 +371,9 @@ class MarginalizedKingPDF:
     values for event–source pairs within ``angular_cutoff`` of each other.
     A :class:`~kingmaker.pdf.KingPDF` instance is accessible via :attr:`king`
     for sampling, CDF evaluation, and similar point-source operations.
-    Alpha and beta outside the grid are clamped to its edges with a
-    :class:`RuntimeWarning`.
+    Valid alpha and beta outside the grid are clamped to its edges with a
+    :class:`RuntimeWarning`; non-finite values, alpha <= 0, and beta <= 1
+    raise :class:`ValueError`.
 
     Parameters
     ----------
@@ -475,6 +476,14 @@ class MarginalizedKingPDF:
         )
         # self._grid has shape (n_sources, n_alpha, n_beta, n_signed_delta_dec)
 
+    @staticmethod
+    def _check_params(alpha: npt.NDArray[np.floating], beta: npt.NDArray[np.floating]) -> None:
+        """Raise ValueError if alpha or beta is outside the King distribution's domain."""
+        if not np.all(np.isfinite(alpha) & (alpha > 0)):
+            raise ValueError("alpha must be finite and > 0 for the King distribution.")
+        if not np.all(np.isfinite(beta) & (beta > 1)):
+            raise ValueError("beta must be finite and > 1 for the King distribution.")
+
     def _interpolate(self, queries: npt.NDArray[np.floating]) -> npt.NDArray[np.floating]:
         """
         Interpolate the grid, clamping alpha and beta to its edges.
@@ -559,6 +568,7 @@ class MarginalizedKingPDF:
         x = np.atleast_1d(x)
         alpha = np.atleast_1d(alpha)
         beta = np.atleast_1d(beta)
+        self._check_params(alpha, beta)
 
         signed_delta_dec = x - float(source_dec)
         within = np.abs(signed_delta_dec) <= self.angular_cutoff
@@ -624,6 +634,7 @@ class MarginalizedKingPDF:
         event_decs = np.asarray(event_decs, dtype=np.float64)
         alpha = np.asarray(alpha, dtype=np.float64)
         beta = np.asarray(beta, dtype=np.float64)
+        self._check_params(alpha, beta)
 
         n_events = len(event_decs)
         n_sources = len(source_decs)

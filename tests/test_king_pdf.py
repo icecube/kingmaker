@@ -554,3 +554,24 @@ class TestMarginalizedKingPDFClamping:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             narrow_mkpdf.pdf(x, np.radians([1.0, 2.0]), np.array([2.0, 3.0]), 0.0)
+
+    @pytest.mark.parametrize(
+        ("alpha", "beta"),
+        [
+            (0.0, 2.5),
+            (-np.radians(1.5), 2.5),
+            (np.nan, 2.5),
+            (np.inf, 2.5),
+            (np.radians(1.5), 1.0),
+            (np.radians(1.5), 0.5),
+            (np.radians(1.5), np.nan),
+        ],
+    )
+    def test_invalid_params_raise(self, narrow_mkpdf, alpha, beta):
+        x = np.radians([0.0, 1.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(ValueError):
+                narrow_mkpdf.pdf(x, alpha, beta, 0.0)
+            with pytest.raises(ValueError):
+                narrow_mkpdf.evaluate(np.array([0.0]), x, np.full(2, alpha), np.full(2, beta))
