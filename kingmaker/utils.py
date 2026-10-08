@@ -385,7 +385,7 @@ def _build_marginalized_grid(
     dec_true_grid : ndarray, shape (n_dec,)
         Source declination grid points in radians.
     alpha_grid : ndarray, shape (n_alpha,)
-        King alpha grid points in radians.
+        King alpha grid points in radians, ascending.
     beta_grid : ndarray, shape (n_beta,)
         King beta grid points.
     norm_grid : ndarray, shape (n_alpha, n_beta)
@@ -395,8 +395,8 @@ def _build_marginalized_grid(
     signed_delta_dec_grid : ndarray, shape (n_delta_dec,)
         Grid of dec_reco - dec_true offsets in radians.
     n_ra_bins : int
-        Number of RA integration intervals per source, spanning the RA
-        half-width of the angular cutoff.
+        Number of asinh-spaced RA integration intervals per source, spanning
+        the RA half-width of the angular cutoff.
 
     Returns
     -------
@@ -415,7 +415,8 @@ def _build_marginalized_grid(
             ra_max = np.pi
         else:
             ra_max = np.arcsin(np.sin(angular_cutoff) / np.cos(dec_true_grid[i]))
-        ra_grid = np.linspace(0.0, ra_max, n_ra_bins + 1)
+        ra_scale = alpha_grid[0] / 2 / np.cos(dec_true_grid[i])
+        ra_grid = ra_scale * np.sinh(np.linspace(0.0, np.arcsinh(ra_max / ra_scale), n_ra_bins + 1))
         for j in range(n_alpha):
             for k in range(n_beta):
                 grid[i, j, k, :] = _marginalize_ra(

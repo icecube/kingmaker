@@ -235,13 +235,14 @@ The interpolation grid is a 4D array indexed by:
 #. **β** — log-spaced from ``points_beta`` (default: 60 values,
    ``np.geomspace(1.01, 1000, 60)``, matching the
    :class:`~kingmaker.fitting.KingPSFFitter` bounds).
-#. **signed_delta_dec = δ_reco − δ_source** — uniformly spaced over
-   [−``angular_cutoff``, +``angular_cutoff``] (default: 200 points).
+#. **signed_delta_dec = δ_reco − δ_source** — asinh-spaced over
+   [−``angular_cutoff``, +``angular_cutoff``] (default: 200 points): uniform
+   within half the smallest ``points_alpha`` of zero, logarithmic beyond.
 
 The RA average at each grid point is computed via trapezoidal quadrature
-over ``n_ra_bins + 1`` nodes spanning the RA half-width of ``angular_cutoff``
-around each source (default: 100 intervals). All of these can be customized
-at construction:
+over ``n_ra_bins + 1`` asinh-spaced nodes spanning the RA half-width of
+``angular_cutoff`` around each source (default: 100 intervals). All of these
+can be customized at construction:
 
 .. code-block:: python
 

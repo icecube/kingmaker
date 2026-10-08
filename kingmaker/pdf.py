@@ -388,10 +388,11 @@ class MarginalizedKingPDF:
         Beta grid points. Default: 60 log-spaced values from 1.01 to 1000,
         matching the :class:`~kingmaker.fitting.KingPSFFitter` bounds.
     n_signed_delta_dec : int, optional
-        Number of grid points in the signed declination-offset axis. Default: 200.
+        Number of grid points in the signed declination-offset axis, asinh-spaced
+        to concentrate them near zero. Default: 200.
     n_ra_bins : int, optional
-        Number of RA integration intervals per source, spanning the RA
-        half-width of ``angular_cutoff``. Default: 100.
+        Number of asinh-spaced RA integration intervals per source, spanning
+        the RA half-width of ``angular_cutoff``. Default: 100.
     """
 
     def __init__(
@@ -450,10 +451,11 @@ class MarginalizedKingPDF:
         """
         self._log10_points_alpha = np.log10(self._points_alpha)
 
-        # signed_delta_dec spans [-angular_cutoff, +angular_cutoff]; the PDF
-        # is zero outside this range regardless of source declination.
-        self._signed_delta_dec = np.linspace(
-            -self.angular_cutoff, self.angular_cutoff, self._n_signed_delta_dec
+        # Uniform near zero, logarithmic beyond.
+        scale = self._points_alpha[0] / 2
+        u_max = np.arcsinh(self.angular_cutoff / scale)
+        self._signed_delta_dec = scale * np.sinh(
+            np.linspace(-u_max, u_max, self._n_signed_delta_dec)
         )
 
         # Normalization depends only on (alpha, beta), not on source declination,
