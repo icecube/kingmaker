@@ -261,6 +261,44 @@ class TestKingPSFFitterCorrelated:
 
 
 # ---------------------------------------------------------------------------
+# Anderson-Darling objective
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def ad_setup():
+    rng = np.random.default_rng(RNG_SEED)
+    events = _make_events(500, np.radians(1.0), 2.5, "aux", np.zeros(500), rng)
+    fitter = KingPSFFitter(
+        events, parametrization_bins={"aux": [-1.0, 1.0]}, minimum_counts=100, weight_field=None
+    )
+    dpsi = _KING_PDF.sample(2000, np.radians(1.5), 2.0, rng=rng)
+    bins = np.quantile(dpsi, np.linspace(0, 1, 31))
+    cdf_hist = np.cumsum(np.histogram(dpsi, bins)[0]) / len(dpsi)
+    return fitter, cdf_hist, bins
+
+
+class TestAndersonDarlingObjective:
+    @pytest.mark.parametrize(("alpha_deg", "beta"), [(1.0, 3.0), (1.5, 2.0), (3.0, 1.2)])
+    def test_gradient_matches_finite_difference(self, ad_setup, alpha_deg, beta):
+        fitter, cdf_hist, bins = ad_setup
+        params = np.array([np.radians(alpha_deg), beta])
+        _, grad = fitter._cdf_anderson_darling(cdf_hist, 2000.0, bins, *params)
+        for k in range(2):
+            step = np.zeros(2)
+            step[k] = params[k] * 1e-6
+            up = fitter._cdf_anderson_darling(cdf_hist, 2000.0, bins, *(params + step))[0]
+            down = fitter._cdf_anderson_darling(cdf_hist, 2000.0, bins, *(params - step))[0]
+            assert_allclose(grad[k], (up - down) / (2 * step[k]), rtol=1e-4)
+
+    def test_minimum_near_true_parameters(self, ad_setup):
+        fitter, cdf_hist, bins = ad_setup
+        at_truth = fitter._cdf_anderson_darling(cdf_hist, 2000.0, bins, np.radians(1.5), 2.0)[0]
+        too_wide = fitter._cdf_anderson_darling(cdf_hist, 2000.0, bins, np.radians(3.0), 2.0)[0]
+        assert at_truth < too_wide
+
+
+# ---------------------------------------------------------------------------
 # extension_grid
 # ---------------------------------------------------------------------------
 
