@@ -9,9 +9,9 @@ Jupyter notebook in ``examples/`` for additional plots and benchmarks.
 King PDF basics
 ----------------
 
-:class:`~kingmaker.pdf.KingPDF` evaluates the PDF/CDF (see :doc:`quickstart`),
-draws samples, and marginalizes over right ascension for signal-subtraction
-likelihoods.
+:class:`~kingmaker.pdf.KingPDF` evaluates the PDF/CDF (see :doc:`quickstart`)
+and draws samples; :class:`~kingmaker.pdf.MarginalizedKingPDF` averages it over
+right ascension for signal-subtraction likelihoods.
 
 **Sampling angular offsets**
 
@@ -29,15 +29,15 @@ likelihoods.
    # (ra, dec) for a given true source position.
    psi = king.sample(10_000, alpha, beta, n_grid=10_000)
 
-**Marginalizing over right ascension**
+**Averaging over right ascension**
 
-Signal-subtraction likelihood terms need the King PDF marginalized over
-right ascension: the probability of an event reconstructing at a given
-declination, for a source at a given true declination.
+Signal-subtraction likelihood terms need the King PDF averaged over right
+ascension: the signal density (sr⁻¹) at a reconstructed declination after RA
+scrambling, for a source at a given true declination.
 :class:`~kingmaker.pdf.MarginalizedKingPDF` exposes two methods for this:
 
 - :meth:`~kingmaker.pdf.MarginalizedKingPDF.pdf` ``(x, alpha, beta, source_dec)``
-  evaluates the marginalized profile for a **single source** and returns a
+  evaluates the RA-averaged profile for a **single source** and returns a
   **dense array**. Intended for plotting and single-source checks.
 - :meth:`~kingmaker.pdf.MarginalizedKingPDF.evaluate` ``(source_decs, event_decs, alpha, beta)``
   evaluates all (event, source) pairs at once and returns a
@@ -75,7 +75,7 @@ declination, for a source at a given true declination.
 - ``source_declination`` / ``points_alpha`` / ``points_beta`` /
   ``n_signed_delta_dec`` / ``n_ra_bins`` (:class:`~kingmaker.pdf.MarginalizedKingPDF`
   constructor): control the source positions and interpolation grid for the
-  RA-marginalized PDF. See :doc:`signal_subtraction` for details.
+  RA-averaged PDF. See :doc:`signal_subtraction` for details.
 
 `basic_demo.ipynb <https://github.com/mjlarson/kingmaker/blob/main/examples/basic_demo.ipynb>`_
     Parameter effects, normalization checks, and sampling/evaluation speed
@@ -180,7 +180,7 @@ End-to-end point-source likelihood
 :class:`~kingmaker.fitting.KingPSFFitter` and
 :class:`~kingmaker.pdf.KingPDF` behind a single interface: fit (or load
 cached fit results) once, then evaluate the PDF per-event many times across
-trials. It also optionally integrates
+trials. It also optionally wraps
 :class:`~kingmaker.pdf.MarginalizedKingPDF` for signal-subtraction
 likelihoods via :meth:`~kingmaker.wrapper.KingSpatialLikelihood.evaluate_marginalized_pdf`.
 
@@ -201,14 +201,14 @@ above:
        parametrization_bins=parametrization_bins,
        spectral_indices=[1.0, 2.0, 3.0, 4.0],
        cache_parameters=False,
-       # Enable the RA-marginalized path for signal-subtraction likelihoods.
+       # Enable the RA-averaged path for signal-subtraction likelihoods.
        enable_marginalization=True,
        marginalization_source_decs=np.array([source_dec]),
        marginalization_angular_cutoff=np.radians(10.0),
    )
 
    # Per trial: cache per-event parameters once, then evaluate as needed.
-   # set_events precomputes both the standard and marginalized PDF matrices.
+   # set_events precomputes both the standard and RA-averaged PDF matrices.
    wrapper.set_events(
        data_events,
        source_ras=np.array([source_ra]),
@@ -221,7 +221,7 @@ above:
    pdf_matrix_steeper = wrapper.evaluate_pdf(data_events, gamma=2.5)  # interpolated
    pdf_values = pdf_matrix.toarray().ravel()  # dense 1-D for downstream use
 
-   # RA-marginalized PDF — sparse (n_events, n_sources) matrix.
+   # RA-averaged PDF (sr⁻¹) — sparse (n_events, n_sources) matrix.
    # Cheap O(nnz) interpolation on precomputed .data arrays; no interpn call.
    marg_matrix = wrapper.evaluate_marginalized_pdf(data_events, gamma=2.0)
    marg_steeper = wrapper.evaluate_marginalized_pdf(data_events, gamma=2.5)
@@ -240,12 +240,12 @@ above:
   :class:`~kingmaker.fitting.KingPSFFitter`.
 - ``enable_marginalization`` / ``marginalization_source_decs``: set
   ``enable_marginalization=True`` and supply a source-declination array to
-  activate the marginalized path. At construction,
+  activate the RA-averaged path. At construction,
   :class:`~kingmaker.pdf.MarginalizedKingPDF` builds its 4D interpolation
   grid (expensive, done once). ``set_events`` then precomputes one sparse
   matrix per spectral index; ``evaluate_marginalized_pdf`` interpolates
   between them in O(nnz) without further grid lookups.
-- ``marginalization_angular_cutoff``: cutoff for the marginalized PDF,
+- ``marginalization_angular_cutoff``: cutoff for the RA-averaged PDF,
   independent of the point-source ``angular_cutoff``. Defaults to the same
   value as ``angular_cutoff`` if not set.
 - **Gotcha:** ``evaluate_pdf`` and ``evaluate_marginalized_pdf`` both require

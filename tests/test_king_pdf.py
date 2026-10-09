@@ -5,11 +5,14 @@ Covers initialization, PDF/CDF correctness and consistency, normalization,
 angular cutoff enforcement, array broadcasting, sampling, and marginalization.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
 from kingmaker.pdf import KingPDF, MarginalizedKingPDF
+from kingmaker.utils import angular_distance
 
 # ---------------------------------------------------------------------------
 # Shared fixtures and helpers
@@ -314,6 +317,26 @@ def mkpdf():
     )
 
 
+FINE_SOURCE_DEC = np.radians(20.0)
+
+
+@pytest.fixture(scope="module")
+def fine_mkpdf():
+    return MarginalizedKingPDF(
+        source_declination=[FINE_SOURCE_DEC],
+        angular_cutoff=np.pi,
+        points_alpha=np.radians([2.5, 3.5]),
+        points_beta=np.array([1.8, 2.2]),
+        n_signed_delta_dec=801,
+        n_ra_bins=400,
+    )
+
+
+@pytest.fixture(scope="module")
+def full_sphere_mkpdf():
+    return MarginalizedKingPDF(source_declination=[0.0], angular_cutoff=np.pi)
+
+
 class TestMarginalizedKingPDFInit:
     def test_builds_cache_with_defaults(self):
         mkpdf = MarginalizedKingPDF(
@@ -345,7 +368,7 @@ class TestMarginalizedKingPDFInit:
             n_signed_delta_dec=40,
             n_ra_bins=20,
         )
-        assert mkpdf._grid.shape == (1, 30, 20, 40)
+        assert mkpdf._grid.shape == (1, 30, 60, 40)
 
     def test_invalid_points_alpha_raises(self):
         with pytest.raises(ValueError):
@@ -391,6 +414,51 @@ class TestMarginalizedKingPDFPdf:
         x = np.radians(np.linspace(-3.0, 3.0, 10))
         result = mkpdf.pdf(x, np.radians(1.0), 2.0, np.radians(0.0))
         assert result.shape == (10,)
+
+    def test_normalized_over_sphere(self, fine_mkpdf):
+        dec = np.linspace(-np.pi / 2, np.pi / 2, 2001)
+        result = fine_mkpdf.pdf(dec, np.radians(3.0), 2.0, FINE_SOURCE_DEC)
+        assert_allclose(2 * np.pi * np.trapezoid(result * np.cos(dec), dec), 1.0, rtol=1e-3)
+
+    def test_matches_direct_ra_average(self, fine_mkpdf):
+        alpha, beta = np.radians(3.0), 2.0
+        dec_reco = FINE_SOURCE_DEC + np.radians(1.0)
+        ra = np.linspace(0, 2 * np.pi, 4001)
+        psi = angular_distance(0.0, FINE_SOURCE_DEC, ra, dec_reco)
+        king_values = KingPDF(angular_cutoff=np.pi).pdf(psi, alpha, beta)
+        expected = np.trapezoid(king_values, ra) / (2 * np.pi)
+        result = fine_mkpdf.pdf([dec_reco], alpha, beta, FINE_SOURCE_DEC)[0]
+        assert_allclose(result, expected, rtol=1e-2)
+
+    @pytest.mark.parametrize("source_dec_deg", [0.0, 60.0, 80.0])
+    def test_narrow_psf_small_cutoff(self, source_dec_deg):
+        source_dec, cutoff = np.radians(source_dec_deg), np.radians(5.0)
+        alpha, beta = np.radians(0.3), 2.5
+        mkpdf = MarginalizedKingPDF(
+            source_declination=[source_dec],
+            angular_cutoff=cutoff,
+            points_alpha=np.array([alpha, 2 * alpha]),
+            points_beta=np.array([beta, 2 * beta]),
+        )
+        dec_reco = source_dec + mkpdf._signed_delta_dec[100]
+        ra = np.linspace(0, 2 * np.pi, 400001)
+        psi = angular_distance(0.0, source_dec, ra, dec_reco)
+        king_values = KingPDF(angular_cutoff=cutoff).pdf(psi, alpha, beta)
+        expected = np.trapezoid(king_values, ra) / (2 * np.pi)
+        result = mkpdf.pdf([dec_reco], alpha, beta, source_dec)[0]
+        assert_allclose(result, expected, rtol=1e-2)
+
+    @pytest.mark.parametrize("alpha_deg", [0.2, 0.64])
+    @pytest.mark.parametrize("offset", [0.0, 1.0])
+    def test_default_grid_narrow_psf_full_sphere(self, full_sphere_mkpdf, alpha_deg, offset):
+        alpha, beta = np.radians(alpha_deg), 2.5
+        dec_reco = offset * alpha
+        ra = np.linspace(0, 2 * np.pi, 400001)
+        psi = angular_distance(0.0, 0.0, ra, dec_reco)
+        king_values = KingPDF(angular_cutoff=np.pi).pdf(psi, alpha, beta)
+        expected = np.trapezoid(king_values, ra) / (2 * np.pi)
+        result = full_sphere_mkpdf.pdf([dec_reco], alpha, beta, 0.0)[0]
+        assert_allclose(result, expected, rtol=1e-2)
 
 
 class TestMarginalizedKingPDFEvaluate:
@@ -438,3 +506,72 @@ class TestMarginalizedKingPDFEvaluate:
         first = mkpdf.evaluate(source_decs, event_decs, alpha, beta)
         second = mkpdf.evaluate(source_decs, event_decs, alpha, beta, mask=first)
         assert_allclose(first.toarray(), second.toarray(), rtol=1e-12)
+
+
+@pytest.fixture(scope="module")
+def narrow_mkpdf():
+    return MarginalizedKingPDF(
+        source_declination=[0.0],
+        angular_cutoff=np.radians(10.0),
+        points_alpha=np.radians([1.0, 2.0]),
+        points_beta=np.array([2.0, 3.0]),
+    )
+
+
+class TestMarginalizedKingPDFClamping:
+    def test_default_beta_grid_matches_fitter_bounds(self, mkpdf):
+        assert mkpdf._points_beta[0] == 1.01
+        assert mkpdf._points_beta[-1] == 1000
+
+    @pytest.mark.parametrize(
+        ("alpha_deg", "beta", "edge_alpha_deg", "edge_beta"),
+        [(1.5, 10.0, 1.5, 3.0), (1.5, 1.5, 1.5, 2.0), (5.0, 2.5, 2.0, 2.5), (0.1, 2.5, 1.0, 2.5)],
+    )
+    def test_pdf_clamps_to_edge(self, narrow_mkpdf, alpha_deg, beta, edge_alpha_deg, edge_beta):
+        x = np.radians([0.0, 1.0, 3.0])
+        with pytest.warns(RuntimeWarning, match="clamping"):
+            result = narrow_mkpdf.pdf(x, np.radians(alpha_deg), beta, 0.0)
+        expected = narrow_mkpdf.pdf(x, np.radians(edge_alpha_deg), edge_beta, 0.0)
+        assert np.all(result > 0)
+        assert_allclose(result, expected, rtol=1e-12)
+
+    def test_evaluate_clamps_with_and_without_mask(self, narrow_mkpdf):
+        source_decs = np.array([0.0])
+        event_decs = np.radians([0.0, 1.0, 3.0])
+        alpha = np.radians([1.5, 1.5, 1.5])
+        beta = np.array([2.5, 10.0, 1000.0])
+        with pytest.warns(RuntimeWarning, match="clamping"):
+            first = narrow_mkpdf.evaluate(source_decs, event_decs, alpha, beta)
+        with pytest.warns(RuntimeWarning, match="clamping"):
+            second = narrow_mkpdf.evaluate(source_decs, event_decs, alpha, beta, mask=first)
+        expected = narrow_mkpdf.evaluate(source_decs, event_decs, alpha, np.clip(beta, 2.0, 3.0))
+        assert first.nnz == 3
+        assert_allclose(first.toarray(), expected.toarray(), rtol=1e-12)
+        assert_allclose(second.toarray(), expected.toarray(), rtol=1e-12)
+
+    def test_grid_edges_do_not_warn(self, narrow_mkpdf):
+        x = np.radians([0.0, 1.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            narrow_mkpdf.pdf(x, np.radians([1.0, 2.0]), np.array([2.0, 3.0]), 0.0)
+
+    @pytest.mark.parametrize(
+        ("alpha", "beta"),
+        [
+            (0.0, 2.5),
+            (-np.radians(1.5), 2.5),
+            (np.nan, 2.5),
+            (np.inf, 2.5),
+            (np.radians(1.5), 1.0),
+            (np.radians(1.5), 0.5),
+            (np.radians(1.5), np.nan),
+        ],
+    )
+    def test_invalid_params_raise(self, narrow_mkpdf, alpha, beta):
+        x = np.radians([0.0, 1.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(ValueError):
+                narrow_mkpdf.pdf(x, alpha, beta, 0.0)
+            with pytest.raises(ValueError):
+                narrow_mkpdf.evaluate(np.array([0.0]), x, np.full(2, alpha), np.full(2, beta))

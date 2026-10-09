@@ -617,7 +617,7 @@ class KingSpatialLikelihood:
 
     def evaluate_marginalized_pdf(self, events: npt.NDArray[Any], gamma: float = 2) -> csr_array:
         """
-        Evaluate the RA-marginalized King PDF for all (event, source) pairs.
+        Evaluate the RA-averaged King PDF (sr⁻¹) for all (event, source) pairs.
 
         Returns a sparse ``(n_events, n_sources)`` matrix whose nonzero entries
         are the signal-subtraction PDF values at the requested spectral index.
