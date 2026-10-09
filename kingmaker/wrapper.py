@@ -322,13 +322,6 @@ class KingSpatialLikelihood:
                 "that these arrays have the same length when passing into set_events."
             )
 
-        if (not self.multiple_source_warning_logged) and (len(source_ras) > 1):
-            logger.warning(
-                "Multiple source positions provided. This has not been tested and"
-                " may not work as expected. Please check the results carefully!"
-            )
-            self.multiple_source_warning_logged = True
-
         source_extensions = (
             np.zeros(len(source_ras))
             if source_extensions is None
